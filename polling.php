@@ -18,6 +18,7 @@ telegram('setMyCommands', ['commands' => [
   ['command'=>'balance','description'=>'Текущие остатки'],
   ['command'=>'week','description'=>'Сводка за неделю'],
   ['command'=>'month','description'=>'Сводка за месяц'],
+  ['command'=>'limits','description'=>'Лимиты по категориям'],
   ['command'=>'help','description'=>'Помощь'],
 ]]);
 

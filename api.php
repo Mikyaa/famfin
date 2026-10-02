@@ -25,8 +25,21 @@ try {
       'month' => $month,
       'week' => $week,
       'recent' => $recent,
+      'limits' => limits_status(),
       'category_groups' => $config['category_groups'] ?? ['fixed'=>[],'variable'=>[]],
     ]);
+  }
+
+  if ($method === 'GET' && $action === 'limits') {
+    json_out(['status' => limits_status(), 'categories' => known_categories(), 'warn_options' => WARN_PERCENTS]);
+  }
+
+  if ($method === 'POST' && $action === 'limits') {
+    $d = json_decode(file_get_contents('php://input'), true) ?: [];
+    if (!is_array($d['limits'] ?? null)) json_out(['error' => 'Нет данных'], 422);
+    $warn = isset($d['warn_percent']) ? (int)$d['warn_percent'] : null;
+    $changes = save_limits($d['limits'], $warn, $member);
+    json_out(['ok' => true, 'changed' => count($changes), 'status' => limits_status()]);
   }
 
   if ($method === 'GET' && $action === 'report') {
@@ -175,7 +188,13 @@ try {
     $group = in_array($groupInput, ['fixed','variable'], true) ? $groupInput : category_group_of($category);
     $q = db()->prepare('INSERT INTO transactions(telegram_id,kind,amount,category,category_group,note,occurred_on) VALUES(?,?,?,?,?,?,?)');
     $q->execute([$member['id'], $kind, $amount, $category, $group, $note, $date]);
-    json_out(['ok'=>true, 'id'=>db()->lastInsertId(), 'category_group'=>$group]);
+    $id = db()->lastInsertId();
+    // Limits never block a record; they only report where the family stands
+    $limits = [];
+    if ($kind === 'expense') {
+      try { $limits = check_limit_alerts($category, $date, $member, (float)$amount); } catch (Throwable $e) { error_log((string)$e); }
+    }
+    json_out(['ok'=>true, 'id'=>$id, 'category_group'=>$group, 'limits'=>$limits]);
   }
 
   json_out(['error'=>'Not found'], 404);

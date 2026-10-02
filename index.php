@@ -59,7 +59,7 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
         <button data-user="854102139" class="selected">Миржан</button>
         <button data-user="995540516">Томирис</button>
       </div>
-      <div class="avatar" id="avatar">₸</div>
+      <button type="button" class="avatar" id="avatar" aria-label="Профиль и лимиты">₸</button>
     </div>
   </header>
 
@@ -104,6 +104,11 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
           <small class="mini-sub" id="monthVariableShare"></small>
         </div>
       </div>
+    </div>
+
+    <div class="section" id="limitsSection">
+      <div class="section-title"><h2>Лимиты на месяц</h2><button type="button" class="text-button" id="limitsEdit">Настроить</button></div>
+      <div id="limitsList" class="limits card"></div>
     </div>
 
     <div class="section">
@@ -226,6 +231,7 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       <div class="field-label">Категория</div>
       <div class="cat-grid" id="catGrid"></div>
       <button type="button" class="custom-cat-btn" id="customCatBtn">+ Своя категория</button>
+      <div class="limit-hint" id="limitHint" aria-live="polite" hidden></div>
 
       <div class="field-label">Дата</div>
       <div class="date-row" id="dateRow">
@@ -301,6 +307,36 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
     <div class="confirm-actions">
       <button id="confirmCancel" class="ghost">Остаться</button>
       <button id="confirmOk">Выйти</button>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="profileSheet" hidden>
+  <div class="sheet-backdrop" data-profile-close></div>
+  <div class="sheet-content" role="dialog" aria-labelledby="profileTitle">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header">
+      <h2 id="profileTitle">Профиль</h2>
+      <button class="sheet-close" data-profile-close aria-label="Закрыть">×</button>
+    </div>
+    <div class="sheet-body">
+      <div class="profile-head">
+        <i class="balance-dot" id="profileDot">₸</i>
+        <div><div class="balance-name" id="profileName">—</div><div class="balance-sub">Семейный бюджет · доступ через Telegram</div></div>
+      </div>
+
+      <div>
+        <h3 class="profile-section-title">Лимиты на месяц</h3>
+        <p class="limits-help">Общие для всей семьи и считаются по календарному месяцу. Трату можно записать и сверх лимита — он просто уйдёт в минус, а бот предупредит обоих.</p>
+      </div>
+
+      <div class="field-label">Предупреждать, когда осталось меньше</div>
+      <div class="group-toggle" id="warnToggle"></div>
+
+      <div id="limitsForm" class="limit-form"><div class="loading-placeholder"><div class="spinner"></div></div></div>
+
+      <button class="sheet-submit" id="limitsSave" type="button" disabled>Сохранить лимиты</button>
+      <?php if (!$localDev): ?><a href="logout.php" class="profile-logout" id="profileLogout">Выйти из аккаунта</a><?php endif; ?>
     </div>
   </div>
 </div>
