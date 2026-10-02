@@ -1,0 +1,17 @@
+Options -Indexes
+
+<FilesMatch "\.(sql|md|sqlite|sqlite3|db|log|example|json|lock)$">
+  Require all denied
+</FilesMatch>
+
+<FilesMatch "^(config(\.example)?\.php|lib\.php|router\.php|polling\.php|\.gitignore|\.env.*)$">
+  Require all denied
+</FilesMatch>
+
+RedirectMatch 403 ^/storage(/|$)
+
+<IfModule mod_headers.c>
+  Header set X-Content-Type-Options "nosniff"
+  Header set X-Frame-Options "SAMEORIGIN"
+  Header set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>
