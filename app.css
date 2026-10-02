@@ -505,3 +505,25 @@ button,a,input{touch-action:manipulation}
 }
 #warnToggle{grid-template-columns:repeat(3,1fr)}
 #warnToggle button{min-height:40px}
+
+/* Limits v2: scopes, periods, rollover */
+.limit-section{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;padding:14px 0 2px;font-size:13px;font-weight:700;color:#656a7d;text-transform:uppercase;letter-spacing:.4px}
+.limit-section span{font-weight:500;text-transform:none;letter-spacing:0;color:var(--muted)}
+.limit-section:first-child{padding-top:10px}
+.limit-carry{font-style:normal;color:var(--purple);font-weight:600}
+.limit-tabs{display:flex;flex-direction:column;gap:8px}
+.limit-tabs .group-toggle button{min-height:40px;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.limit-tabs .group-toggle em{font-style:normal;font-size:12px;font-weight:700;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:#e6e3ff;color:var(--purple);display:inline-grid;place-items:center}
+.limit-tabs .group-toggle em:empty{display:none}
+.limit-scope-hint{font-size:13px;color:var(--muted);line-height:1.45;margin:0 2px}
+.switch-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px;border:1px solid var(--line);border-radius:14px;cursor:pointer;position:relative}
+.switch-row>span{display:flex;flex-direction:column;gap:4px;min-width:0}
+.switch-row b{font-size:15px}
+.switch-row small{font-size:13px;color:var(--muted);line-height:1.45}
+.switch-row input{position:absolute;opacity:0;width:1px;height:1px}
+.switch{flex-shrink:0;width:50px;height:30px;border-radius:15px;background:#d9dae3;position:relative;transition:background .2s ease}
+.switch:after{content:'';position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:50%;background:white;box-shadow:0 2px 5px #29304d33;transition:transform .2s ease}
+.switch-row input:checked+.switch{background:var(--purple)}
+.switch-row input:checked+.switch:after{transform:translateX(20px)}
+.switch-row input:focus-visible+.switch{outline:2px solid var(--purple);outline-offset:2px}
+.limit-tabs{position:sticky;top:-16px;z-index:2;background:white;padding:12px 0 10px;box-shadow:0 8px 10px -8px #29304d1f}

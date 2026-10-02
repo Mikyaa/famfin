@@ -792,7 +792,7 @@ function openDrill(opts){
   const group = opts.group || 'all';
   const title = opts.title || 'Детализация';
   const view = opts.view === 'transactions' ? 'transactions' : 'categories';
-  drillState = {from: opts.from, to: opts.to, group, rootGroup:group, rootTitle:title, category: opts.category || '', view, data: null};
+  drillState = {from: opts.from, to: opts.to, group, rootGroup:group, rootTitle:title, category: opts.category || '', member: Boolean(opts.member), view, data: null};
   $('#drillTitle').textContent = title;
   const sheet = $('#drillSheet');
   sheet.hidden = false;
@@ -822,6 +822,7 @@ async function loadDrill(){
     u.searchParams.set('to', drillState.to);
     if (drillState.group !== 'all') u.searchParams.set('group', drillState.group);
     if (drillState.category) u.searchParams.set('category', drillState.category);
+    if (drillState.member) u.searchParams.set('member', 'me');
     const d = await request(u.toString(), {signal: drillAbort.signal});
     drillState.data = d;
     renderDrill();
@@ -915,8 +916,9 @@ $$('#drillTabs button').forEach(b => b.onclick = () => {
 });
 
 /* ========== LIMITS ========== */
-// Monthly limits are shared by the family and never block an entry: they only inform.
+// Limits are family-wide or personal, monthly or weekly, and never block an entry.
 const TOTAL_LIMIT = '*';
+const PERIOD_LABEL = {month: 'месяц', week: 'неделя'};
 let limitsStatus = null;
 
 function limitTail(i){
@@ -925,60 +927,74 @@ function limitTail(i){
   return `превышен на ${money(-i.remaining)} ${cur(currency)}`;
 }
 
+function carryText(i){
+  if (!i.carry) return '';
+  return `${i.carry > 0 ? '+' : '−'}${money(Math.abs(i.carry))} перенос`;
+}
+
+function limitName(i){
+  const scope = i.scope === 'me' ? 'Личный лимит' : 'Лимит';
+  const what = i.category === TOTAL_LIMIT ? 'на все расходы' : `«${i.label}»`;
+  return `${scope} ${what} (${PERIOD_LABEL[i.period]})`;
+}
+
 function renderLimits(status){
   limitsStatus = status;
   const el = $('#limitsList');
   if (!status || !status.items.length) {
     el.innerHTML = `<div class="limits-empty">
-      <p>Задайте лимиты на месяц — например, на кафе или покупки. Бот предупредит обоих, когда останется мало.</p>
+      <p>Задайте лимиты на месяц или неделю — общие для семьи или личные. Бот предупредит, когда останется мало.</p>
       <button type="button" class="limits-empty-btn" data-open-profile>Настроить лимиты</button>
     </div>`;
     el.querySelector('[data-open-profile]').onclick = openProfile;
     return;
   }
   const c = cur(currency);
-  el.innerHTML = status.items.map(i => `
-    <button type="button" class="limit-item ${i.state}" data-cat="${safe(i.category)}" aria-label="${safe(i.label)}: ${limitTail(i)}">
+  let section = '';
+  el.innerHTML = status.items.map(i => {
+    const head = `${i.scope === 'family' ? 'Семейные' : 'Мои личные'} · ${PERIOD_LABEL[i.period]}`;
+    const title = head !== section ? `<div class="limit-section">${head}<span>${fmtDate(i.from)} — ${fmtDate(i.to)}</span></div>` : '';
+    section = head;
+    const carry = carryText(i);
+    return `${title}<button type="button" class="limit-item ${i.state}" data-id="${i.id}" aria-label="${safe(limitName(i))}: ${limitTail(i)}">
       <div class="limit-top">
-        <span class="limit-name">${i.category === TOTAL_LIMIT ? '<i class="dot-mark total"></i>' : `<i class="dot-mark ${i.group}"></i>`}${safe(i.label)}</span>
+        <span class="limit-name"><i class="dot-mark ${i.group}"></i>${safe(i.label)}</span>
         <span class="limit-amount">${money(i.spent)} <small>/ ${money(i.limit)} ${c}</small></span>
       </div>
       <div class="limit-track"><i style="width:${Math.min(100, i.percent)}%"></i></div>
-      <div class="limit-sub"><span class="limit-left">${limitTail(i)}</span><span>${Math.round(i.percent)}%</span></div>
-    </button>`).join('');
+      <div class="limit-sub"><span class="limit-left">${limitTail(i)}</span><span>${carry ? `<em class="limit-carry">${carry}</em> · ` : ''}${Math.round(i.percent)}%</span></div>
+    </button>`;
+  }).join('');
   $$('#limitsList .limit-item').forEach(b => b.onclick = () => {
-    const cat = b.dataset.cat;
-    const total = cat === TOTAL_LIMIT;
-    openDrill({from: status.from, to: status.to, group: 'all', category: total ? '' : cat, view: total ? 'categories' : 'transactions',
-      title: total ? 'Все расходы за месяц' : cat});
+    const i = status.items.find(x => String(x.id) === b.dataset.id);
+    if (!i) return;
+    const total = i.category === TOTAL_LIMIT;
+    openDrill({from: i.from, to: i.to, group: 'all', category: total ? '' : i.category, member: i.scope === 'me',
+      view: total ? 'categories' : 'transactions',
+      title: `${total ? 'Все расходы' : i.category}${i.scope === 'me' ? ' · мои' : ''} · ${PERIOD_LABEL[i.period]}`});
   });
 }
 
-function limitFor(cat){ return limitsStatus?.items.find(i => i.category === cat) || null; }
-
-// Live hint in the new-entry sheet: what the limit looks like after this expense
+// Live hint in the new-entry sheet: what each affected limit looks like after this expense
 function updateLimitHint(){
   const el = $('#limitHint');
-  const thisMonth = sheetState.date.slice(0, 7) === todayISO().slice(0, 7);
-  if (sheetState.kind !== 'expense' || !sheetState.category || !thisMonth) { el.hidden = true; return; }
+  if (sheetState.kind !== 'expense' || !sheetState.category || !limitsStatus) { el.hidden = true; return; }
   const amount = Number(sheetState.amount) || 0;
-  const lines = [];
-  let worst = 'ok';
+  const date = sheetState.date;
+  const affected = limitsStatus.items.filter(i => (i.category === sheetState.category || i.category === TOTAL_LIMIT) && date >= i.from && date <= i.to);
+  if (!affected.length) { el.hidden = true; return; }
   const rank = {ok:0, warn:1, over:2};
-  for (const item of [limitFor(sheetState.category), limitFor(TOTAL_LIMIT)]) {
-    if (!item) continue;
-    const after = item.remaining - amount;
-    const warnEdge = item.limit * (limitsStatus.warn_percent / 100);
-    const state = after <= 0 ? 'over' : after < warnEdge ? 'warn' : 'ok';
+  let worst = 'ok';
+  const lines = affected.map(i => {
+    const after = i.remaining - amount;
+    const state = after <= 0 ? 'over' : after < i.limit * limitsStatus.warn_percent / 100 ? 'warn' : 'ok';
     if (rank[state] > rank[worst]) worst = state;
-    const name = item.category === TOTAL_LIMIT ? 'Общий лимит' : `Лимит «${safe(item.label)}»`;
     let text;
-    if (!amount) text = item.remaining >= 0 ? `осталось ${money(item.remaining)} из ${money(item.limit)} ${cur(currency)}` : `уже превышен на ${money(-item.remaining)} ${cur(currency)}`;
-    else if (after >= 0) text = `после траты останется ${money(after)} из ${money(item.limit)} ${cur(currency)}`;
+    if (!amount) text = i.remaining >= 0 ? `осталось ${money(i.remaining)} из ${money(i.limit)} ${cur(currency)}` : `уже превышен на ${money(-i.remaining)} ${cur(currency)}`;
+    else if (after >= 0) text = `останется ${money(after)} из ${money(i.limit)} ${cur(currency)}`;
     else text = `будет превышен на ${money(-after)} ${cur(currency)}`;
-    lines.push(`<div><b>${name}:</b> ${text}</div>`);
-  }
-  if (!lines.length) { el.hidden = true; return; }
+    return `<div><b>${safe(limitName(i))}:</b> ${text}</div>`;
+  });
   if (worst === 'over') lines.push('<div class="limit-hint-note">Запись всё равно сохранится — лимит просто уйдёт в минус.</div>');
   el.className = 'limit-hint ' + worst;
   el.innerHTML = lines.join('');
@@ -988,25 +1004,24 @@ function updateLimitHint(){
 function limitNoticeAfterSave(items){
   const bad = (items || []).filter(i => i.state !== 'ok').sort((a, b) => b.percent - a.percent)[0];
   if (!bad) return null;
-  const name = bad.category === TOTAL_LIMIT ? 'Общий лимит' : `Лимит «${bad.label}»`;
-  if (bad.remaining < 0) return `${name} превышен на ${money(-bad.remaining)} ${cur(currency)}`;
-  if (bad.remaining === 0) return `${name} исчерпан`;
-  return `${name}: осталось ${money(bad.remaining)} ${cur(currency)}`;
+  if (bad.remaining < 0) return `${limitName(bad)} превышен на ${money(-bad.remaining)} ${cur(currency)}`;
+  if (bad.remaining === 0) return `${limitName(bad)} исчерпан`;
+  return `${limitName(bad)}: осталось ${money(bad.remaining)} ${cur(currency)}`;
 }
 
 /* ========== PROFILE ========== */
-let profileInitial = '';
-let profileWarn = 20;
+// Form state for all four limit sets, so switching tabs keeps unsaved input
+let profile = null;
 
 function digitsOnly(v){ return String(v || '').replace(/\D/g, '').slice(0, 9); }
 
 function profileSnapshot(){
-  const values = $$('#limitsForm input[data-cat]').map(i => [i.dataset.cat, digitsOnly(i.value)]);
-  return JSON.stringify([profileWarn, values]);
+  if (!profile) return '';
+  const sets = Object.keys(profile.values).sort().map(k => [k, Object.entries(profile.values[k]).filter(([, v]) => v).sort()]);
+  return JSON.stringify([profile.warn, profile.rollover, sets]);
 }
 
-function profileDirty(){ return profileInitial !== '' && profileSnapshot() !== profileInitial; }
-
+function profileDirty(){ return Boolean(profile) && profileSnapshot() !== profile.initial; }
 function syncProfileSave(){ $('#limitsSave').disabled = !profileDirty(); }
 
 async function openProfile(){
@@ -1020,71 +1035,99 @@ async function openProfile(){
   $('#limitsForm').innerHTML = '<div class="loading-placeholder"><div class="spinner"></div></div>';
   $('#warnToggle').innerHTML = '';
   $('#limitsSave').disabled = true;
-  profileInitial = '';
+  profile = null;
   try {
-    const d = await request('api.php?action=limits');
-    renderProfileForm(d);
+    renderProfile(await request('api.php?action=limits'));
   } catch(e) { notice(e.message); closeProfile(true); }
 }
 
-function renderProfileForm(d){
-  const c = cur(currency);
-  const spentBy = {};
-  d.status.items.forEach(i => { spentBy[i.category] = i; });
-  profileWarn = d.status.warn_percent;
-  $('#warnToggle').innerHTML = d.warn_options.map(p => `<button type="button" data-warn="${p}" class="${p === profileWarn ? 'selected' : ''}">${p}%</button>`).join('');
-  $$('#warnToggle button').forEach(b => b.onclick = () => {
-    profileWarn = Number(b.dataset.warn);
-    $$('#warnToggle button').forEach(x => x.classList.toggle('selected', x === b));
-    syncProfileSave();
-  });
-
-  const row = (cat, label, group) => {
-    const item = spentBy[cat];
-    const value = item ? money(item.limit) : '';
-    const sub = item ? `потрачено ${money(item.spent)} ${c} · ${limitTail(item)}` : 'без лимита';
-    return `<label class="limit-row ${item ? 'has-limit' : ''}">
-      <span class="limit-row-name"><span><i class="dot-mark ${group}"></i>${safe(label)}</span><small>${sub}</small></span>
-      <span class="limit-input"><input type="text" inputmode="numeric" autocomplete="off" placeholder="—" data-cat="${safe(cat)}" value="${value}" aria-label="Лимит: ${safe(label)}"><b>${c}</b></span>
-    </label>`;
-  };
+function renderProfile(d){
+  const values = {'family|month': {}, 'family|week': {}, 'me|month': {}, 'me|week': {}};
+  d.limits.forEach(l => { values[`${l.scope}|${l.period}`][l.category] = String(Math.round(l.amount)); });
   const groups = {fixed: [], variable: []};
   d.categories.forEach(x => (groups[x.group] || groups.variable).push(x.category));
+  profile = {values, groups, status: d.status, warn: d.status.warn_percent, rollover: d.status.rollover, scope: 'family', period: 'month', initial: ''};
+
+  $('#warnToggle').innerHTML = d.warn_options.map(p => `<button type="button" data-warn="${p}">${p}%</button>`).join('');
+  $$('#warnToggle button').forEach(b => b.onclick = () => { profile.warn = Number(b.dataset.warn); syncProfileControls(); });
+  $('#rolloverToggle').checked = profile.rollover;
+  $('#rolloverToggle').onchange = () => { profile.rollover = $('#rolloverToggle').checked; syncProfileSave(); };
+  $$('#limitScope button').forEach(b => b.onclick = () => { profile.scope = b.dataset.scope; renderLimitRows(); });
+  $$('#limitPeriod button').forEach(b => b.onclick = () => { profile.period = b.dataset.period; renderLimitRows(); });
+
+  renderLimitRows();
+  profile.initial = profileSnapshot();
+  syncProfileControls();
+}
+
+function syncProfileControls(){
+  $$('#warnToggle button').forEach(b => b.classList.toggle('selected', Number(b.dataset.warn) === profile.warn));
+  $$('#limitScope button').forEach(b => b.classList.toggle('selected', b.dataset.scope === profile.scope));
+  $$('#limitPeriod button').forEach(b => b.classList.toggle('selected', b.dataset.period === profile.period));
+  // Show how many limits each tab holds
+  const count = key => Object.values(profile.values[key]).filter(Boolean).length;
+  $$('#limitScope button').forEach(b => { const n = count(`${b.dataset.scope}|month`) + count(`${b.dataset.scope}|week`); b.querySelector('em').textContent = n ? n : ''; });
+  $$('#limitPeriod button').forEach(b => { const n = count(`${profile.scope}|${b.dataset.period}`); b.querySelector('em').textContent = n ? n : ''; });
+  syncProfileSave();
+}
+
+function renderLimitRows(){
+  const c = cur(currency);
+  const key = `${profile.scope}|${profile.period}`;
+  const set = profile.values[key];
+  const per = profile.period === 'week' ? 'неделю' : 'месяц';
+  $('#limitScopeHint').textContent = profile.scope === 'family'
+    ? `Общие траты семьи за ${per}. Уведомления получают оба.`
+    : `Только ваши траты за ${per}. Видите и получаете уведомления только вы.`;
+  const statusOf = cat => profile.status.items.find(i => i.scope === profile.scope && i.period === profile.period && i.category === cat);
+  const row = (cat, label, group) => {
+    const item = statusOf(cat);
+    const v = set[cat] || '';
+    let sub = 'без лимита';
+    if (item) sub = `потрачено ${money(item.spent)} ${c} · ${limitTail(item)}${item.carry ? ` · ${carryText(item)}` : ''}`;
+    return `<label class="limit-row ${v ? 'has-limit' : ''}">
+      <span class="limit-row-name"><span><i class="dot-mark ${group}"></i>${safe(label)}</span><small>${sub}</small></span>
+      <span class="limit-input"><input type="text" inputmode="numeric" autocomplete="off" placeholder="—" data-cat="${safe(cat)}" value="${v ? money(Number(v)) : ''}" aria-label="Лимит: ${safe(label)}"><b>${c}</b></span>
+    </label>`;
+  };
   $('#limitsForm').innerHTML =
-    row(TOTAL_LIMIT, 'Все расходы за месяц', 'total') +
-    `<div class="limit-group-title">Обязательные</div>` + groups.fixed.map(n => row(n, n, 'fixed')).join('') +
-    `<div class="limit-group-title">Переменные</div>` + groups.variable.map(n => row(n, n, 'variable')).join('');
+    row(TOTAL_LIMIT, `Все расходы за ${per}`, 'total') +
+    `<div class="limit-group-title">Обязательные</div>` + profile.groups.fixed.map(n => row(n, n, 'fixed')).join('') +
+    `<div class="limit-group-title">Переменные</div>` + profile.groups.variable.map(n => row(n, n, 'variable')).join('');
   $$('#limitsForm input[data-cat]').forEach(inp => inp.oninput = () => {
     const v = digitsOnly(inp.value);
     inp.value = v ? money(Number(v)) : '';
+    set[inp.dataset.cat] = v;
     inp.closest('.limit-row').classList.toggle('has-limit', Boolean(v));
-    syncProfileSave();
+    syncProfileControls();
   });
-  profileInitial = profileSnapshot();
-  syncProfileSave();
+  syncProfileControls();
 }
 
 async function saveProfile(){
   const btn = $('#limitsSave');
-  const limits = {};
-  $$('#limitsForm input[data-cat]').forEach(i => { const v = digitsOnly(i.value); if (v && Number(v) > 0) limits[i.dataset.cat] = Number(v); });
+  const limits = [];
+  Object.entries(profile.values).forEach(([key, set]) => {
+    const [scope, period] = key.split('|');
+    Object.entries(set).forEach(([category, v]) => { if (v && Number(v) > 0) limits.push({scope, period, category, amount: Number(v)}); });
+  });
   btn.disabled = true;
   btn.innerHTML = '<div class="spinner small"></div> Сохранение…';
   try {
-    const r = await request('api.php?action=limits', {method: 'POST', body: JSON.stringify({limits, warn_percent: profileWarn})});
+    const r = await request('api.php?action=limits', {method: 'POST', body: JSON.stringify({limits, warn_percent: profile.warn, rollover: profile.rollover})});
     renderLimits(r.status);
-    notice(r.changed ? 'Лимиты сохранены — бот сообщит об изменениях' : 'Без изменений', true);
+    notice(r.changed ? 'Лимиты сохранены' : 'Без изменений', true);
     await closeProfile(true);
   } catch(e) { notice(e.message); btn.disabled = false; }
-  finally { btn.textContent = 'Сохранить лимиты'; }
+  finally { btn.textContent = 'Сохранить'; }
 }
 
 async function closeProfile(force = false){
   if (!force && profileDirty()) {
-    const ok = await showConfirm('Лимиты не сохранены. Закрыть без сохранения?');
+    const ok = await showConfirm('Изменения не сохранены. Закрыть без сохранения?');
     if (!ok) return;
   }
-  profileInitial = '';
+  profile = null;
   document.body.style.overflow = '';
   await animateClose($('#profileSheet'));
 }

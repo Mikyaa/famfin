@@ -107,7 +107,7 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
     </div>
 
     <div class="section" id="limitsSection">
-      <div class="section-title"><h2>Лимиты на месяц</h2><button type="button" class="text-button" id="limitsEdit">Настроить</button></div>
+      <div class="section-title"><h2>Лимиты</h2><button type="button" class="text-button" id="limitsEdit">Настроить</button></div>
       <div id="limitsList" class="limits card"></div>
     </div>
 
@@ -326,16 +326,34 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       </div>
 
       <div>
-        <h3 class="profile-section-title">Лимиты на месяц</h3>
-        <p class="limits-help">Общие для всей семьи и считаются по календарному месяцу. Трату можно записать и сверх лимита — он просто уйдёт в минус, а бот предупредит обоих.</p>
+        <h3 class="profile-section-title">Лимиты</h3>
+        <p class="limits-help">Трату можно записать и сверх лимита — он просто уйдёт в минус, а бот предупредит. Неделя начинается в понедельник.</p>
       </div>
 
-      <div class="field-label">Предупреждать, когда осталось меньше</div>
-      <div class="group-toggle" id="warnToggle"></div>
+      <div class="limit-tabs">
+        <div class="group-toggle" id="limitScope" role="tablist" aria-label="Чьи лимиты">
+          <button type="button" data-scope="family" class="selected">Семья <em></em></button>
+          <button type="button" data-scope="me">Только мои <em></em></button>
+        </div>
+        <div class="group-toggle" id="limitPeriod" role="tablist" aria-label="Период">
+          <button type="button" data-period="month" class="selected">Месяц <em></em></button>
+          <button type="button" data-period="week">Неделя <em></em></button>
+        </div>
+        <p class="limit-scope-hint" id="limitScopeHint"></p>
+      </div>
 
       <div id="limitsForm" class="limit-form"><div class="loading-placeholder"><div class="spinner"></div></div></div>
 
-      <button class="sheet-submit" id="limitsSave" type="button" disabled>Сохранить лимиты</button>
+      <h3 class="profile-section-title">Настройки лимитов</h3>
+      <label class="switch-row">
+        <span><b>Переносить остаток</b><small>Неистраченное прибавится к лимиту следующего периода, перерасход — вычтется из него.</small></span>
+        <input type="checkbox" id="rolloverToggle" role="switch">
+        <i class="switch" aria-hidden="true"></i>
+      </label>
+      <div class="field-label">Предупреждать, когда осталось меньше</div>
+      <div class="group-toggle" id="warnToggle"></div>
+
+      <button class="sheet-submit" id="limitsSave" type="button" disabled>Сохранить</button>
       <?php if (!$localDev): ?><a href="logout.php" class="profile-logout" id="profileLogout">Выйти из аккаунта</a><?php endif; ?>
     </div>
   </div>

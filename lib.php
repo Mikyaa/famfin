@@ -26,8 +26,8 @@ function db(): PDO {
     $pdo->exec("CREATE TABLE IF NOT EXISTS transactions(id INTEGER PRIMARY KEY AUTOINCREMENT,telegram_id INTEGER NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('expense','topup')),amount NUMERIC NOT NULL,category TEXT NOT NULL,category_group TEXT NULL,note TEXT NOT NULL DEFAULT '',occurred_on TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(telegram_id) REFERENCES members(telegram_id));");
     $pdo->exec("CREATE TABLE IF NOT EXISTS auth_codes(id INTEGER PRIMARY KEY AUTOINCREMENT,telegram_id INTEGER NOT NULL,code TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,expires_at TEXT NOT NULL,used INTEGER DEFAULT 0);");
     $pdo->exec("CREATE TABLE IF NOT EXISTS auth_attempts(ip TEXT PRIMARY KEY,attempts INTEGER DEFAULT 0,blocked_until TEXT NULL,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);");
-    $pdo->exec("CREATE TABLE IF NOT EXISTS category_limits(category TEXT PRIMARY KEY,amount NUMERIC NOT NULL,updated_by INTEGER NULL,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);");
-    $pdo->exec("CREATE TABLE IF NOT EXISTS limit_alerts(category TEXT NOT NULL,period TEXT NOT NULL,level INTEGER NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(category,period,level));");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS spend_limits(id INTEGER PRIMARY KEY AUTOINCREMENT,scope_id INTEGER NOT NULL DEFAULT 0,category TEXT NOT NULL,period TEXT NOT NULL,amount NUMERIC NOT NULL,created_on TEXT NOT NULL,updated_by INTEGER NULL,updated_at TEXT DEFAULT CURRENT_TIMESTAMP,UNIQUE(scope_id,category,period));");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS limit_notices(limit_id INTEGER NOT NULL,period_key TEXT NOT NULL,level INTEGER NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(limit_id,period_key,level));");
     $pdo->exec("CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY,v TEXT NOT NULL);");
     migrate_sqlite($pdo);
     seed_local_demo($pdo);
@@ -63,8 +63,8 @@ function migrate_mysql(PDO $pdo): void {
     $pdo->exec("CREATE INDEX transactions_group_date_idx ON transactions(category_group, occurred_on)");
   }
   $pdo->exec("CREATE TABLE IF NOT EXISTS auth_codes(id INT AUTO_INCREMENT PRIMARY KEY,telegram_id BIGINT NOT NULL,code VARCHAR(6) NOT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,expires_at TIMESTAMP NOT NULL,used TINYINT DEFAULT 0,INDEX(code,used,expires_at))");
-  $pdo->exec("CREATE TABLE IF NOT EXISTS category_limits(category VARCHAR(80) PRIMARY KEY,amount DECIMAL(14,2) NOT NULL,updated_by BIGINT NULL,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-  $pdo->exec("CREATE TABLE IF NOT EXISTS limit_alerts(category VARCHAR(80) NOT NULL,period CHAR(7) NOT NULL,level TINYINT NOT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(category,period,level)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+  $pdo->exec("CREATE TABLE IF NOT EXISTS spend_limits(id INT AUTO_INCREMENT PRIMARY KEY,scope_id BIGINT NOT NULL DEFAULT 0,category VARCHAR(80) NOT NULL,period VARCHAR(8) NOT NULL,amount DECIMAL(14,2) NOT NULL,created_on DATE NOT NULL,updated_by BIGINT NULL,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,UNIQUE KEY spend_limits_unique(scope_id,category,period)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+  $pdo->exec("CREATE TABLE IF NOT EXISTS limit_notices(limit_id INT NOT NULL,period_key CHAR(10) NOT NULL,level TINYINT NOT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(limit_id,period_key,level))");
   $pdo->exec("CREATE TABLE IF NOT EXISTS settings(k VARCHAR(40) PRIMARY KEY,v VARCHAR(255) NOT NULL)");
   $pdo->exec("CREATE TABLE IF NOT EXISTS auth_attempts(ip VARCHAR(45) PRIMARY KEY,attempts INT DEFAULT 0,blocked_until TIMESTAMP NULL,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)");
 }
@@ -489,11 +489,15 @@ function verify_auth_code(string $code, string $ip): ?array {
   return ['id' => $id, 'name' => user_label($id)];
 }
 
-/* ========== CATEGORY LIMITS ========== */
-// Monthly spending limits shared by the whole family. A limit never blocks an expense;
-// it only drives progress, hints and Telegram alerts. '*' is the limit on all expenses.
+/* ========== SPENDING LIMITS ========== */
+// A limit belongs to the family (scope_id 0) or to one member (scope_id = telegram id),
+// covers a month or a Monday-based week, and never blocks an expense: it only drives
+// progress, hints and Telegram alerts. Category '*' means all expenses.
+// With rollover on, the previous period's leftover is added to the limit and an
+// overspend is subtracted (one period back, not compounding).
 const TOTAL_LIMIT = '*';
 const WARN_PERCENTS = [10, 20, 30];
+const LIMIT_PERIODS = ['month', 'week'];
 
 function currency_symbol(): string {
   global $config;
@@ -522,13 +526,41 @@ function warn_percent(): int {
   return in_array($v, WARN_PERCENTS, true) ? $v : 20;
 }
 
-function get_limits(): array {
-  $out = [];
-  foreach (db()->query('SELECT category,amount FROM category_limits') as $r) $out[$r['category']] = (float)$r['amount'];
-  return $out;
-}
+function rollover_enabled(): bool { return get_setting('limit_rollover', '1') === '1'; }
 
 function limit_label(string $category): string { return $category === TOTAL_LIMIT ? 'Все расходы' : $category; }
+
+function period_window(string $period, DateTimeImmutable $d): array {
+  if ($period === 'week') {
+    $from = $d->modify('monday this week');
+    return [$from->format('Y-m-d'), $from->modify('+7 days')->format('Y-m-d')];
+  }
+  $from = $d->modify('first day of this month');
+  return [$from->format('Y-m-d'), $from->modify('first day of next month')->format('Y-m-d')];
+}
+
+function previous_window(string $period, string $from): array {
+  $f = new DateTimeImmutable($from);
+  return period_window($period, $period === 'week' ? $f->modify('-7 days') : $f->modify('-1 month'));
+}
+
+// [telegram_id][category] => sum of expenses in [from, until)
+function spend_matrix(string $from, string $until): array {
+  $q = db()->prepare("SELECT telegram_id,category,SUM(amount) total FROM transactions WHERE kind='expense' AND occurred_on>=? AND occurred_on<? GROUP BY telegram_id,category");
+  $q->execute([$from, $until]);
+  $m = [];
+  foreach ($q as $r) $m[(int)$r['telegram_id']][(string)$r['category']] = (float)$r['total'];
+  return $m;
+}
+
+function spent_for(array $matrix, int $scopeId, string $category): float {
+  $sum = 0.0;
+  foreach ($matrix as $member => $cats) {
+    if ($scopeId !== 0 && $member !== $scopeId) continue;
+    foreach ($cats as $cat => $v) if ($category === TOTAL_LIMIT || (string)$cat === $category) $sum += $v;
+  }
+  return $sum;
+}
 
 // 0 = fine, 1 = less than warn% left, 2 = exhausted or exceeded
 function limit_level(float $spent, float $limit, int $warn): int {
@@ -538,143 +570,185 @@ function limit_level(float $spent, float $limit, int $warn): int {
   return 0;
 }
 
-function limits_status(?string $date = null): array {
-  $limits = get_limits();
-  $d = new DateTimeImmutable($date ?? 'today');
-  $from = $d->modify('first day of this month')->format('Y-m-d');
-  $until = $d->modify('first day of next month')->format('Y-m-d');
-  $warn = warn_percent();
-  $spent = [];
-  $groups = [];
-  $total = 0.0;
-  if ($limits) {
-    $q = db()->prepare("SELECT category,MAX(COALESCE(category_group,'')) cg,SUM(amount) total FROM transactions WHERE kind='expense' AND occurred_on>=? AND occurred_on<? GROUP BY category");
-    $q->execute([$from, $until]);
-    foreach ($q as $r) {
-      $spent[$r['category']] = (float)$r['total'];
-      $groups[$r['category']] = $r['cg'] ?: null;
-      $total += (float)$r['total'];
-    }
+function limit_rows(int $memberId): array {
+  $q = db()->prepare('SELECT id,scope_id,category,period,amount,created_on FROM spend_limits WHERE scope_id IN (0,?)');
+  $q->execute([$memberId]);
+  return $q->fetchAll();
+}
+
+function category_groups_map(): array {
+  global $config;
+  $map = [];
+  foreach (['fixed', 'variable'] as $g) foreach ($config['category_groups'][$g] ?? [] as $c) $map[$c] = $g;
+  foreach (db()->query("SELECT category,MAX(COALESCE(category_group,'')) cg FROM transactions GROUP BY category") as $r) {
+    if (!isset($map[$r['category']])) $map[(string)$r['category']] = category_group_of((string)$r['category'], $r['cg'] ?: null);
   }
+  return $map;
+}
+
+// Family limits plus the given member's personal ones, for the periods containing $date
+function limits_status(int $memberId, ?string $date = null): array {
+  $d = new DateTimeImmutable($date ?? 'today');
+  $warn = warn_percent();
+  $rollover = rollover_enabled();
+  $groups = category_groups_map();
+  $matrices = [];
+  $matrix = function(string $from, string $until) use (&$matrices) { return $matrices["$from|$until"] ??= spend_matrix($from, $until); };
   $items = [];
-  foreach ($limits as $cat => $limit) {
-    $s = $cat === TOTAL_LIMIT ? $total : ($spent[$cat] ?? 0.0);
-    $level = limit_level($s, $limit, $warn);
+  foreach (limit_rows($memberId) as $r) {
+    $period = $r['period'];
+    $category = (string)$r['category'];
+    $scopeId = (int)$r['scope_id'];
+    [$from, $until] = period_window($period, $d);
+    $base = (float)$r['amount'];
+    $spent = spent_for($matrix($from, $until), $scopeId, $category);
+    $carry = 0.0;
+    if ($rollover && $r['created_on'] < $from) {
+      [$pFrom, $pUntil] = previous_window($period, $from);
+      $carry = $base - spent_for($matrix($pFrom, $pUntil), $scopeId, $category);
+    }
+    $limit = $base + $carry;
+    $level = limit_level($spent, $limit, $warn);
     $items[] = [
-      'category' => $cat,
-      'label' => limit_label($cat),
-      'group' => $cat === TOTAL_LIMIT ? 'total' : category_group_of($cat, $groups[$cat] ?? null),
-      'limit' => $limit,
-      'spent' => $s,
-      'remaining' => $limit - $s,
-      'percent' => $limit > 0 ? round($s / $limit * 100, 1) : 0,
+      'id' => (int)$r['id'],
+      'scope' => $scopeId === 0 ? 'family' : 'me',
+      'category' => $category,
+      'label' => limit_label($category),
+      'group' => $category === TOTAL_LIMIT ? 'total' : ($groups[$category] ?? category_group_of($category)),
+      'period' => $period,
+      'from' => $from,
+      'to' => (new DateTimeImmutable($until))->modify('-1 day')->format('Y-m-d'),
+      'base' => $base,
+      'carry' => round($carry, 2),
+      'limit' => round($limit, 2),
+      'spent' => $spent,
+      'remaining' => round($limit - $spent, 2),
+      'percent' => $limit > 0 ? round($spent / $limit * 100, 1) : 100,
       'state' => ['ok', 'warn', 'over'][$level],
     ];
   }
-  // Total first, then the most-used limits
-  usort($items, fn($a, $b) => [$b['category'] === TOTAL_LIMIT, $b['percent']] <=> [$a['category'] === TOTAL_LIMIT, $a['percent']]);
-  return [
-    'period' => substr($from, 0, 7),
-    'from' => $from,
-    'to' => (new DateTimeImmutable($until))->modify('-1 day')->format('Y-m-d'),
-    'warn_percent' => $warn,
-    'items' => $items,
-  ];
+  // Family before personal, month before week, the total first, then the most-used
+  usort($items, fn($a, $b) => [$a['scope'] !== 'family', $a['period'] !== 'month', $a['category'] !== TOTAL_LIMIT, -$a['percent']]
+    <=> [$b['scope'] !== 'family', $b['period'] !== 'month', $b['category'] !== TOTAL_LIMIT, -$b['percent']]);
+  return ['warn_percent' => $warn, 'rollover' => $rollover, 'items' => $items];
 }
 
 function known_categories(): array {
-  global $config;
-  $cats = [];
-  foreach (['fixed', 'variable'] as $g) foreach ($config['category_groups'][$g] ?? [] as $c) $cats[$c] = $g;
-  foreach (db()->query("SELECT category,MAX(COALESCE(category_group,'')) cg FROM transactions WHERE kind='expense' GROUP BY category") as $r) {
-    if (!isset($cats[$r['category']])) $cats[$r['category']] = category_group_of($r['category'], $r['cg'] ?: null);
-  }
-  foreach (array_keys(get_limits()) as $c) if ($c !== TOTAL_LIMIT && !isset($cats[$c])) $cats[$c] = category_group_of($c);
   $out = [];
-  foreach ($cats as $name => $group) $out[] = ['category' => (string)$name, 'group' => $group];
+  foreach (category_groups_map() as $name => $group) $out[] = ['category' => (string)$name, 'group' => $group];
+  foreach (db()->query("SELECT DISTINCT category FROM spend_limits WHERE category<>'*'") as $r) {
+    if (!in_array((string)$r['category'], array_column($out, 'category'), true)) $out[] = ['category' => (string)$r['category'], 'group' => category_group_of((string)$r['category'])];
+  }
   return $out;
+}
+
+function notify_member(int $id, string $text): void {
+  global $config;
+  // Never message real chats from a local test copy
+  if (!empty($config['local_test_mode'])) { error_log("[notify $id] $text"); return; }
+  try { telegram('sendMessage', ['chat_id' => $id, 'text' => $text], 5); } catch (Throwable $e) { error_log('notify failed: ' . $e->getMessage()); }
 }
 
 function notify_family(string $text, ?int $exceptId = null): void {
   global $config;
-  foreach ($config['allowed_users'] as $id) {
-    if ($id === $exceptId) continue;
-    // Never message real chats from a local test copy
-    if (!empty($config['local_test_mode'])) { error_log("[notify $id] $text"); continue; }
-    try { telegram('sendMessage', ['chat_id' => $id, 'text' => $text], 5); } catch (Throwable $e) { error_log('notify failed: ' . $e->getMessage()); }
-  }
+  foreach ($config['allowed_users'] as $id) if ($id !== $exceptId) notify_member($id, $text);
 }
 
-function save_limits(array $input, ?int $warn, array $member): array {
-  if (count($input) > 200) throw new RuntimeException('Слишком много лимитов');
-  $current = get_limits();
+function limit_title(string $scope, string $category, string $period): string {
+  $per = $period === 'week' ? 'на неделю' : 'на месяц';
+  if ($category === TOTAL_LIMIT) return ($scope === 'me' ? 'Ваш личный общий лимит ' : 'Общий лимит ') . $per;
+  return ($scope === 'me' ? 'Ваш личный лимит' : 'Лимит') . " «{$category}» $per";
+}
+
+// Replaces the family limits and the member's personal limits with $input
+function save_limits(array $input, ?int $warn, ?bool $rollover, array $member): array {
+  if (count($input) > 400) throw new RuntimeException('Слишком много лимитов');
+  if ($warn !== null && !in_array($warn, WARN_PERCENTS, true)) throw new RuntimeException('Неверный порог предупреждения');
   $next = [];
-  foreach ($input as $cat => $amount) {
-    $cat = trim((string)$cat);
+  foreach ($input as $row) {
+    if (!is_array($row)) throw new RuntimeException('Неверные данные лимита');
+    $scope = $row['scope'] ?? '';
+    $period = $row['period'] ?? '';
+    $cat = trim((string)($row['category'] ?? ''));
+    $amount = $row['amount'] ?? null;
+    if (!in_array($scope, ['family', 'me'], true) || !in_array($period, LIMIT_PERIODS, true)) throw new RuntimeException('Неверный тип лимита');
     if ($cat === '' || mb_strlen($cat) > 80) throw new RuntimeException('Неверное название категории');
     if ($amount === null || $amount === '' || (is_numeric($amount) && (float)$amount == 0.0)) continue;
     $v = filter_var($amount, FILTER_VALIDATE_FLOAT);
     if ($v === false || $v < 1 || $v > 100000000) throw new RuntimeException('Лимит должен быть от 1 до 100 000 000');
-    $next[$cat] = round($v, 2);
+    $scopeId = $scope === 'family' ? 0 : (int)$member['id'];
+    $next["$scopeId|$period|$cat"] = [$scopeId, $period, $cat, round($v, 2)];
   }
-  if ($warn !== null && !in_array($warn, WARN_PERCENTS, true)) throw new RuntimeException('Неверный порог предупреждения');
+
+  $current = [];
+  foreach (limit_rows((int)$member['id']) as $r) $current["{$r['scope_id']}|{$r['period']}|{$r['category']}"] = $r;
 
   $pdo = db();
-  $period = date('Y-m');
-  $changes = [];
+  $familyChanges = [];
+  $count = 0;
+  $line = fn($period, $cat, $text) => '• ' . limit_label($cat) . ($period === 'week' ? ' (неделя)' : ' (месяц)') . ": $text";
   $pdo->beginTransaction();
   try {
-    $upsert = $pdo->prepare(is_sqlite()
-      ? 'INSERT INTO category_limits(category,amount,updated_by,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(category) DO UPDATE SET amount=excluded.amount,updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP'
-      : 'INSERT INTO category_limits(category,amount,updated_by) VALUES(?,?,?) ON DUPLICATE KEY UPDATE amount=VALUES(amount),updated_by=VALUES(updated_by)');
-    $del = $pdo->prepare('DELETE FROM category_limits WHERE category=?');
-    // A changed limit re-arms its alerts for the current month
-    $rearm = $pdo->prepare('DELETE FROM limit_alerts WHERE category=? AND period=?');
-    foreach ($next as $cat => $v) {
-      if (isset($current[$cat]) && abs($current[$cat] - $v) < 0.005) continue;
-      $upsert->execute([$cat, $v, $member['id']]);
-      $rearm->execute([$cat, $period]);
-      $changes[] = isset($current[$cat])
-        ? '• ' . limit_label($cat) . ': ' . fmt_money($current[$cat]) . ' → ' . fmt_money($v)
-        : '• ' . limit_label($cat) . ': ' . fmt_money($v);
+    $insert = $pdo->prepare('INSERT INTO spend_limits(scope_id,category,period,amount,created_on,updated_by) VALUES(?,?,?,?,?,?)');
+    $update = $pdo->prepare('UPDATE spend_limits SET amount=?,updated_by=? WHERE id=?');
+    $delete = $pdo->prepare('DELETE FROM spend_limits WHERE id=?');
+    // A changed limit re-arms its alerts
+    $rearm = $pdo->prepare('DELETE FROM limit_notices WHERE limit_id=?');
+    foreach ($next as $key => [$scopeId, $period, $cat, $v]) {
+      $old = $current[$key] ?? null;
+      if ($old && abs((float)$old['amount'] - $v) < 0.005) continue;
+      if ($old) { $update->execute([$v, $member['id'], $old['id']]); $rearm->execute([$old['id']]); }
+      else $insert->execute([$scopeId, $cat, $period, $v, date('Y-m-d'), $member['id']]);
+      $count++;
+      if ($scopeId === 0) $familyChanges[] = $line($period, $cat, ($old ? fmt_money((float)$old['amount']) . ' → ' : '') . fmt_money($v));
     }
-    foreach ($current as $cat => $v) {
-      if (isset($next[$cat])) continue;
-      $del->execute([$cat]);
-      $rearm->execute([$cat, $period]);
-      $changes[] = '• ' . limit_label((string)$cat) . ': лимит снят';
+    foreach ($current as $key => $old) {
+      if (isset($next[$key])) continue;
+      $delete->execute([$old['id']]);
+      $rearm->execute([$old['id']]);
+      $count++;
+      if ((int)$old['scope_id'] === 0) $familyChanges[] = $line($old['period'], (string)$old['category'], 'лимит снят');
     }
     if ($warn !== null && $warn !== warn_percent()) {
       set_setting('limit_warn_percent', (string)$warn);
-      $pdo->prepare('DELETE FROM limit_alerts WHERE period=? AND level=1')->execute([$period]);
-      $changes[] = "• Предупреждать, когда осталось меньше $warn%";
+      $pdo->exec('DELETE FROM limit_notices WHERE level=1');
+      $familyChanges[] = "• Предупреждать, когда осталось меньше $warn%";
+      $count++;
+    }
+    if ($rollover !== null && $rollover !== rollover_enabled()) {
+      set_setting('limit_rollover', $rollover ? '1' : '0');
+      $pdo->exec('DELETE FROM limit_notices');
+      $familyChanges[] = $rollover ? '• Остаток переносится на следующий период' : '• Перенос остатка отключён';
+      $count++;
     }
     $pdo->commit();
   } catch (Throwable $e) {
     $pdo->rollBack();
     throw $e;
   }
-  if ($changes) notify_family("⚙️ {$member['name']} изменил(а) лимиты на месяц:\n" . implode("\n", $changes), $member['id']);
-  return $changes;
+  if ($familyChanges) notify_family("⚙️ {$member['name']} изменил(а) лимиты:\n" . implode("\n", $familyChanges), (int)$member['id']);
+  return ['changed' => $count];
 }
 
-// Called after an expense is saved. Sends at most one alert per limit, level and month.
+// Called after an expense is saved. Sends at most one alert per limit, level and period;
+// family limits alert everyone, personal ones only their owner.
 function check_limit_alerts(string $category, string $date, array $member, float $amount): array {
-  $status = limits_status($date);
-  $relevant = array_values(array_filter($status['items'], fn($i) => $i['category'] === $category || $i['category'] === TOTAL_LIMIT));
-  if (!$relevant || substr($date, 0, 7) !== date('Y-m')) return $relevant;
+  $status = limits_status((int)$member['id']);
+  $relevant = array_values(array_filter($status['items'], fn($i) =>
+    ($i['category'] === $category || $i['category'] === TOTAL_LIMIT) && $date >= $i['from'] && $date <= $i['to']));
+  if (!$relevant) return [];
   $insert = db()->prepare(is_sqlite()
-    ? 'INSERT OR IGNORE INTO limit_alerts(category,period,level) VALUES(?,?,?)'
-    : 'INSERT IGNORE INTO limit_alerts(category,period,level) VALUES(?,?,?)');
+    ? 'INSERT OR IGNORE INTO limit_notices(limit_id,period_key,level) VALUES(?,?,?)'
+    : 'INSERT IGNORE INTO limit_notices(limit_id,period_key,level) VALUES(?,?,?)');
   foreach ($relevant as $i) {
     $level = ['ok' => 0, 'warn' => 1, 'over' => 2][$i['state']];
     $fresh = 0;
     for ($l = 1; $l <= $level; $l++) {
-      $insert->execute([$i['category'], $status['period'], $l]);
+      $insert->execute([$i['id'], $i['from'], $l]);
       if ($insert->rowCount() > 0) $fresh = $l;
     }
     if ($fresh === 0 || $fresh !== $level) continue;
-    $name = $i['category'] === TOTAL_LIMIT ? 'Общий лимит на месяц' : "Лимит «{$i['label']}»";
+    $name = limit_title($i['scope'], $i['category'], $i['period']);
     if ($level === 1) {
       $text = "⚠️ $name почти исчерпан\nОсталось " . fmt_money($i['remaining']) . ' из ' . fmt_money($i['limit']) . " (потрачено {$i['percent']}%).";
     } elseif ($i['remaining'] < 0) {
@@ -682,17 +756,21 @@ function check_limit_alerts(string $category, string $date, array $member, float
     } else {
       $text = "🔴 $name исчерпан\nПотрачено " . fmt_money($i['spent']) . ' из ' . fmt_money($i['limit']) . '.';
     }
+    if ($i['carry'] != 0) $text .= "\nС учётом переноса: " . ($i['carry'] > 0 ? '+' : '−') . fmt_money(abs($i['carry'])) . '.';
     $text .= "\nПоследняя трата: {$member['name']} — " . fmt_money($amount) . ($i['category'] === TOTAL_LIMIT ? " ($category)" : '');
-    notify_family($text);
+    if ($i['scope'] === 'family') notify_family($text); else notify_member((int)$member['id'], $text);
   }
   return $relevant;
 }
 
 function format_limits(array $s): string {
-  if (!$s['items']) return "Лимиты не настроены.\nОткройте бюджет → профиль (кнопка с буквой вверху) → «Лимиты на месяц».";
+  if (!$s['items']) return "Лимиты не настроены.\nОткройте бюджет → профиль (кнопка с буквой вверху) → «Лимиты».";
   $icons = ['ok' => '🟢', 'warn' => '🟡', 'over' => '🔴'];
-  $out = "📏 Лимиты на {$s['from']} — {$s['to']}:\n\n";
+  $out = "📏 Лимиты" . ($s['rollover'] ? ' (с переносом остатка)' : '') . ":\n";
+  $section = '';
   foreach ($s['items'] as $i) {
+    $head = ($i['scope'] === 'family' ? 'Семейные' : 'Мои личные') . ' · ' . ($i['period'] === 'week' ? 'неделя' : 'месяц') . " ({$i['from']} — {$i['to']})";
+    if ($head !== $section) { $out .= "\n$head\n"; $section = $head; }
     $tail = $i['remaining'] >= 0 ? 'осталось ' . fmt_money($i['remaining']) : 'превышен на ' . fmt_money(-$i['remaining']);
     $out .= $icons[$i['state']] . ' ' . $i['label'] . ': ' . fmt_money($i['spent']) . ' / ' . fmt_money($i['limit']) . " — $tail\n";
   }
@@ -741,7 +819,7 @@ function handle_bot_command(int $chatId, int $userId, string $text, string $appU
       telegram('sendMessage', ['chat_id' => $chatId, 'text' => format_summary($s, 'Месяц', $b)]);
       break;
     case '/limits':
-      telegram('sendMessage', ['chat_id' => $chatId, 'text' => format_limits(limits_status())]);
+      telegram('sendMessage', ['chat_id' => $chatId, 'text' => format_limits(limits_status($userId))]);
       break;
     case '/help':
     case '/add':

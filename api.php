@@ -25,21 +25,23 @@ try {
       'month' => $month,
       'week' => $week,
       'recent' => $recent,
-      'limits' => limits_status(),
+      'limits' => limits_status((int)$member['id']),
       'category_groups' => $config['category_groups'] ?? ['fixed'=>[],'variable'=>[]],
     ]);
   }
 
   if ($method === 'GET' && $action === 'limits') {
-    json_out(['status' => limits_status(), 'categories' => known_categories(), 'warn_options' => WARN_PERCENTS]);
+    $rows = array_map(fn($r) => ['scope' => (int)$r['scope_id'] === 0 ? 'family' : 'me', 'category' => (string)$r['category'], 'period' => $r['period'], 'amount' => (float)$r['amount']], limit_rows((int)$member['id']));
+    json_out(['status' => limits_status((int)$member['id']), 'limits' => $rows, 'categories' => known_categories(), 'warn_options' => WARN_PERCENTS]);
   }
 
   if ($method === 'POST' && $action === 'limits') {
     $d = json_decode(file_get_contents('php://input'), true) ?: [];
-    if (!is_array($d['limits'] ?? null)) json_out(['error' => 'Нет данных'], 422);
+    if (!is_array($d['limits'] ?? null) || !array_is_list($d['limits'])) json_out(['error' => 'Нет данных'], 422);
     $warn = isset($d['warn_percent']) ? (int)$d['warn_percent'] : null;
-    $changes = save_limits($d['limits'], $warn, $member);
-    json_out(['ok' => true, 'changed' => count($changes), 'status' => limits_status()]);
+    $rollover = isset($d['rollover']) ? (bool)$d['rollover'] : null;
+    $r = save_limits($d['limits'], $warn, $rollover, $member);
+    json_out(['ok' => true, 'changed' => $r['changed'], 'status' => limits_status((int)$member['id'])]);
   }
 
   if ($method === 'GET' && $action === 'report') {
@@ -86,6 +88,11 @@ try {
       $where .= ' AND category = ?';
       $params[] = $category;
     }
+    // Personal limits drill into the current member's own spending
+    if (($_GET['member'] ?? '') === 'me') {
+      $where .= ' AND transactions.telegram_id = ?';
+      $params[] = $member['id'];
+    }
 
     $catQ = db()->prepare("SELECT category, COALESCE(category_group,'') cg, SUM(amount) total, COUNT(*) n FROM transactions WHERE $where GROUP BY category, category_group ORDER BY total DESC");
     $catQ->execute($params);
@@ -101,7 +108,7 @@ try {
     if ($category !== '') {
       // already filtered
     }
-    $txQ = db()->prepare("SELECT t.id, t.amount, t.category, COALESCE(t.category_group,'') cg, t.note, t.occurred_on, m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id WHERE $txWhere ORDER BY t.occurred_on DESC, t.id DESC LIMIT 500");
+    $txQ = db()->prepare("SELECT transactions.id, transactions.amount, transactions.category, COALESCE(transactions.category_group,'') cg, transactions.note, transactions.occurred_on, m.display_name FROM transactions JOIN members m ON m.telegram_id=transactions.telegram_id WHERE $txWhere ORDER BY transactions.occurred_on DESC, transactions.id DESC LIMIT 500");
     $txQ->execute($txParams);
     $transactions = [];
     foreach ($txQ as $r) {
@@ -137,7 +144,8 @@ try {
     $f = fopen('php://output','w');
     fputcsv($f, ['Дата','Тип','Сумма','Категория','Группа','Комментарий','Кто'], ';');
     // Neutralise spreadsheet formulas in user-supplied text
-    $cell = fn($v) => preg_match('/^[=+\-@	]/u', (string)$v) ? "'" . $v : $v;
+    $cell = fn($v) => preg_match('/^[=+\-@	
+]/u', (string)$v) ? "'" . $v : $v;
     foreach ($rows as $r) {
       $group = category_group_of($r['category'], $r['cg'] ?: null);
       fputcsv($f, [
