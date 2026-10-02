@@ -446,3 +446,4 @@ button,a,input{touch-action:manipulation}
 @media(prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important;scroll-behavior:auto !important}
 }
+.login-card a{color:var(--purple);text-decoration-thickness:1px;text-underline-offset:3px;display:inline-block;padding:6px 0}
