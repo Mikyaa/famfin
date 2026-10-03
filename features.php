@@ -105,18 +105,21 @@ function delete_transaction(int $id): bool {
 /* ========== CATEGORY GUESSING ========== */
 // Keyword stems → default categories; used by the bot and the statement import
 const CATEGORY_KEYWORDS = [
-  'Продукты' => ['продукт', 'магнум', 'magnum', 'small', 'смолл', 'галмарт', 'galmart', 'анвар', 'супермаркет', 'гипермаркет', 'овощ', 'фрукт', 'хлеб', 'молок', 'мясо', 'рынок', 'базар', 'arbuz', 'арбуз', 'airba fresh', 'grocery', 'метро кэш', 'metro cash', 'toimart', 'дикси', 'ашан', 'еда домой', 'продукты'],
-  'Кафе и рестораны' => ['кафе', 'ресторан', 'кофе', 'coffee', 'кофейн', 'обед', 'ужин', 'завтрак', 'бар ', 'пицц', 'pizza', 'суши', 'sushi', 'роллы', 'бургер', 'burger', 'kfc', 'mcdonald', 'макдон', 'шаурм', 'донер', 'wolt', 'glovo', 'chocofood', 'яндекс еда', 'yandex eda', 'starbucks', 'столов', 'фастфуд', 'доставка еды', 'чайхан', 'кальян'],
-  'Транспорт' => ['такси', 'taxi', 'яндекс го', 'yandex.go', 'yandex go', 'uber', 'indriver', 'индрайв', 'бензин', 'азс', 'заправк', 'топливо', 'helios', 'гелиос', 'sinooil', 'qazaq oil', 'парковк', 'parking', 'автобус', 'метро', 'onay', 'онай', 'проезд', 'автомойк', 'шиномонтаж', 'сто ', 'техосмотр'],
-  'Дом' => ['коммунал', 'квартплат', 'аренд', 'электроэнерг', 'свет за', 'газ ', 'вода', 'отоплен', 'ремонт', 'мебел', 'посуд', 'бытов', 'хозтовар', 'leroy', 'леруа', 'икеа', 'ikea', 'химчистк', 'клининг', 'кск', 'осмд', 'алсеко', 'alseco'],
+  'Продукты' => ['diona', 'диона', 'аяна', 'береке', 'bereke', 'балмарт', 'mix market', 'кажетмаркет', 'small ', 'продукт', 'магнум', 'magnum', 'small', 'смолл', 'галмарт', 'galmart', 'анвар', 'супермаркет', 'гипермаркет', 'овощ', 'фрукт', 'хлеб', 'молок', 'мясо', 'рынок', 'базар', 'arbuz', 'арбуз', 'airba fresh', 'grocery', 'метро кэш', 'metro cash', 'toimart', 'дикси', 'ашан', 'еда домой', 'продукты'],
+  'Кафе и рестораны' => ['qazan plov', 'плов', 'taptatti', "i'm restaurants", 'restaurant', 'кафе', 'ресторан', 'кофе', 'coffee', 'кофейн', 'обед', 'ужин', 'завтрак', 'бар ', 'пицц', 'pizza', 'суши', 'sushi', 'роллы', 'бургер', 'burger', 'kfc', 'mcdonald', 'макдон', 'шаурм', 'донер', 'wolt', 'glovo', 'chocofood', 'яндекс еда', 'yandex eda', 'starbucks', 'столов', 'фастфуд', 'доставка еды', 'чайхан', 'кальян'],
+  'Транспорт' => ['avtobys', 'lrt ', 'lrt', 'такси', 'taxi', 'яндекс го', 'yandex.go', 'yandex go', 'uber', 'indriver', 'индрайв', 'бензин', 'азс', 'заправк', 'топливо', 'helios', 'гелиос', 'sinooil', 'qazaq oil', 'парковк', 'parking', 'автобус', 'метро', 'onay', 'онай', 'проезд', 'автомойк', 'шиномонтаж', 'сто ', 'техосмотр'],
+  'Дом' => ['ерц', 'коммунал', 'квартплат', 'аренд', 'электроэнерг', 'свет за', 'газ ', 'вода', 'отоплен', 'ремонт', 'мебел', 'посуд', 'бытов', 'хозтовар', 'leroy', 'леруа', 'икеа', 'ikea', 'химчистк', 'клининг', 'кск', 'осмд', 'алсеко', 'alseco'],
   'Здоровье' => ['аптек', 'apteka', 'pharm', 'врач', 'клиник', 'больниц', 'анализ', 'invitro', 'инвитро', 'олимп', 'стоматолог', 'зубн', 'лекарств', 'витамин', 'медицин', 'массаж', 'окулист'],
   'Дети' => ['детск', 'ребен', 'ребён', 'сад ', 'садик', 'школ', 'игрушк', 'памперс', 'подгузн', 'кружок', 'секци', 'репетитор', 'няня', 'детский мир'],
   'Подписки' => ['подписк', 'netflix', 'spotify', 'youtube', 'яндекс плюс', 'yandex plus', 'icloud', 'apple.com', 'google one', 'chatgpt', 'openai', 'claude', 'интернет', 'связь', 'мобильн', 'телефон', 'beeline', 'билайн', 'kcell', 'activ', 'tele2', 'altel', 'kazakhtelecom', 'казахтелеком', 'ivi', 'okko', 'кинопоиск'],
   'Кредиты' => ['кредит', 'рассрочк', 'ипотек', 'kaspi red', 'каспи ред', 'red ', 'займ', 'долг', 'погашен'],
-  'Покупки' => ['одежд', 'обув', 'wildberries', 'вайлдберриз', 'ozon', 'озон', 'kaspi магазин', 'kaspi.kz магазин', 'техник', 'электроник', 'sulpak', 'сулпак', 'technodom', 'технодом', 'mechta', 'мечта', 'zara', 'lc waikiki', 'косметик', 'парфюм', 'подарок', 'подарк', 'aliexpress', 'temu', 'покупк', 'магазин'],
+  'Покупки' => ['fix price', 'fix-price', 'fixprice', 'kaspi magazin', 'зоомаркет', 'зоо', 'lovely store', 'одежд', 'обув', 'wildberries', 'вайлдберриз', 'ozon', 'озон', 'kaspi магазин', 'kaspi.kz магазин', 'техник', 'электроник', 'sulpak', 'сулпак', 'technodom', 'технодом', 'mechta', 'мечта', 'zara', 'lc waikiki', 'косметик', 'парфюм', 'подарок', 'подарк', 'aliexpress', 'temu', 'покупк', 'магазин'],
   'Путешествия' => ['билет', 'авиа', 'air astana', 'эйр астана', 'fly arystan', 'scat', 'отель', 'hotel', 'гостиниц', 'booking', 'airbnb', 'поезд', 'жд ', 'тур ', 'путешеств', 'виза', 'отпуск'],
-  'Развлечения' => ['кино', 'cinema', 'kinopark', 'кинопарк', 'chaplin', 'концерт', 'театр', 'боулинг', 'бильярд', 'квест', 'игр', 'steam', 'playstation', 'развлеч', 'парк ', 'аттракцион', 'музей', 'клуб'],
+  'Развлечения' => ['lordgame', 'компьютерный клуб', 'кино', 'cinema', 'kinopark', 'кинопарк', 'chaplin', 'концерт', 'театр', 'боулинг', 'бильярд', 'квест', 'игр', 'steam', 'playstation', 'развлеч', 'парк ', 'аттракцион', 'музей', 'клуб'],
 ];
+
+// Broad hints used only when no specific keyword matched
+const CATEGORY_FALLBACK = ['маркет' => 'Продукты', 'market' => 'Продукты', 'mart' => 'Продукты', 'гастроном' => 'Продукты', 'store' => 'Покупки', 'shop' => 'Покупки', 'бутик' => 'Покупки', 'coffee' => 'Кафе и рестораны', 'food' => 'Кафе и рестораны'];
 
 function categorize_text(string $text): ?string {
   $t = ' ' . mb_strtolower(trim($text)) . ' ';
@@ -129,6 +132,7 @@ function categorize_text(string $text): ?string {
   foreach (CATEGORY_KEYWORDS as $category => $words) {
     foreach ($words as $w) if (str_contains($t, $w)) return $category;
   }
+  foreach (CATEGORY_FALLBACK as $w => $category) if (str_contains($t, $w)) return $category;
   return null;
 }
 
@@ -380,7 +384,7 @@ function search_operations(string $query, int $limit = 100): array {
 // Purchases are pre-selected; transfers, top-ups and withdrawals are offered unticked.
 function parse_bank_statement(string $text, int $payerId): array {
   $text = str_replace(["\u{00A0}", "\u{2009}", "\u{202F}", "\r"], [' ', ' ', ' ', ''], $text);
-  $re = '/(\d{2})\.(\d{2})\.(\d{2}|\d{4})\s+([+\-−–])\s*(\d[\d ]*(?:[.,]\d{1,2})?)\s*(?:₸|т\b|тг|KZT)?\s+(Покупк[аи]|Пополнени[ея]|Перевод[ы]?|Сняти[ея]|Разное|Плат[её]ж[и]?|Оплата)\s*([^\n]*)/u';
+  $re = '/(\d{2})\.(\d{2})\.(\d{2}|\d{4})\s+([+\-−–])\s*(\d[\d ]*(?:[.,]\d{1,2})?)\s*(?:₸|т\b|тг|KZT)?\s+(Покупк[аи]|Пополнени[ея]|Поступлени[ея]|Перевод[ы]?|Сняти[ея]|Разное|Плат[её]ж[и]?|Оплата)\s*([^\n]*)/u';
   preg_match_all($re, $text, $m, PREG_SET_ORDER);
   $rows = [];
   foreach ($m as $x) {
@@ -562,21 +566,46 @@ function statement_summary(array $rows, int $payerId, string $fileName = ''): st
   $fmt = fn($iso) => (new DateTimeImmutable($iso))->format('d.m.Y');
   $lines = ['📄 Выписка' . ($fileName !== '' ? " «{$fileName}»" : '') . ' · ' . $fmt(min($dates)) . ' — ' . $fmt(max($dates)), '👤 Чья: ' . user_label($payerId), '', 'Найдено операций: ' . count($rows)];
   $lines[] = '🛒 Новые покупки: ' . count($buy) . ($sum ? ' на ' . fmt_money($sum) : '');
+  foreach (statement_scopes($rows) as $sc) if ($sc['key'] !== 'all' && $sc['buy']) $lines[] = '   ' . mb_strtoupper(mb_substr($sc['label'], 0, 1)) . mb_substr($sc['label'], 1) . ': ' . $sc['buy'] . ' на ' . fmt_money($sc['buy_sum']);
   $i = 0;
   foreach ($byCat as $cat => $v) { $lines[] = '   · ' . $cat . ' — ' . fmt_money($v); if (++$i >= 8) break; }
   $unknown = count(array_filter($buy, fn($r) => $r['category'] === 'Другое'));
   if ($unknown) $lines[] = "   ($unknown без категории — попадут в «Другое», можно поправить в приложении)";
   if ($other) $lines[] = '↔️ Переводы, пополнения, снятия: ' . count($other) . ' — по умолчанию не импортирую';
   if ($dups) $lines[] = '♻️ Уже есть в бюджете: ' . count($dups) . ' — пропущу';
+  if ((new DateTimeImmutable(min($dates)))->diff(new DateTimeImmutable(max($dates)))->days > 62) {
+    $lines[] = '';
+    $lines[] = '⚠️ Выписка за большой период. Покупки уменьшают общий остаток, поэтому за прошлые месяцы импортируйте их, только если внесли и пополнения за те же месяцы. Для начала учёта обычно хватает текущего месяца.';
+  }
   return implode("\n", $lines);
 }
 
+// Import windows offered under the summary: this month, last 3 months, whole statement
+function statement_scopes(array $rows): array {
+  $month = (new DateTimeImmutable('first day of this month'))->format('Y-m-d');
+  $three = (new DateTimeImmutable('first day of this month'))->modify('-2 months')->format('Y-m-d');
+  $months = ['январь','февраль','март','апрель','май','июнь','июль','август','сентябрь','октябрь','ноябрь','декабрь'];
+  $out = [];
+  foreach ([['month', $month, 'за ' . $months[(int)date('n') - 1]], ['3m', $three, 'за 3 месяца'], ['all', '0000-00-00', 'за весь период']] as [$key, $from, $label]) {
+    $in = array_filter($rows, fn($r) => !$r['duplicate'] && $r['date'] >= $from);
+    $buy = array_filter($in, fn($r) => $r['purchase']);
+    $out[] = ['key' => $key, 'from' => $from, 'label' => $label, 'buy' => count($buy),
+      'buy_sum' => array_sum(array_column($buy, 'amount')), 'all' => count($in)];
+  }
+  return $out;
+}
+
 function statement_markup(int $userId, int $jobId, array $rows, int $payerId): array {
-  $buy = count(array_filter($rows, fn($r) => $r['purchase'] && !$r['duplicate']));
-  $all = count(array_filter($rows, fn($r) => !$r['duplicate']));
-  $labels = []; $opts = [];
-  if ($buy) { $labels[] = "✅ Импортировать покупки ($buy)"; $opts[] = 'buy'; }
-  if ($all > $buy) { $labels[] = "➕ Всё новое ($all)"; $opts[] = 'all'; }
+  $labels = []; $opts = []; $seen = [];
+  foreach (statement_scopes($rows) as $sc) {
+    // Skip a wider window that adds nothing over the narrower one
+    if (!$sc['buy'] || in_array($sc['buy'], $seen, true)) continue;
+    $seen[] = $sc['buy'];
+    $labels[] = ($sc['key'] === 'month' ? '✅ ' : '') . "Покупки {$sc['label']} — {$sc['buy']}";
+    $opts[] = 'buy:' . $sc['key'];
+  }
+  $month = statement_scopes($rows)[0];
+  if ($month['all'] > $month['buy']) { $labels[] = "➕ Всё новое {$month['label']} — {$month['all']}"; $opts[] = 'all:month'; }
   $labels[] = '📋 Список'; $opts[] = 'list';
   foreach (allowed_members_map() as $id => $name) if ($id !== $payerId) { $labels[] = "👤 Это выписка: $name"; $opts[] = 'payer:' . $id; }
   $labels[] = '✖️ Отмена'; $opts[] = 'cancel';

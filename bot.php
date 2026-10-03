@@ -140,10 +140,10 @@ function bot_handle_document(int $chatId, int $userId, array $doc): void {
     ->execute([$userId, $chatId, (string)$doc['file_id'], mb_substr($name, 0, 200), $r['result']['message_id'] ?? null]);
 }
 
-function bot_statement_entries(array $rows, bool $all): array {
+function bot_statement_entries(array $rows, bool $all, string $from = '0000-00-00'): array {
   $out = [];
   foreach ($rows as $r) {
-    if ($r['duplicate'] || (!$all && !$r['purchase'])) continue;
+    if ($r['duplicate'] || (!$all && !$r['purchase']) || $r['date'] < $from) continue;
     $out[] = ['kind' => $r['kind'], 'amount' => $r['amount'], 'category' => $r['category'], 'note' => $r['note'], 'date' => $r['date']];
   }
   return $out;
@@ -218,7 +218,11 @@ function bot_handle_callback(array $cb): void {
           $answer('Выписка: ' . user_label($payer));
           return;
         }
-        $entries = bot_statement_entries($p['rows'], $opt === 'all');
+        // "buy:month", "buy:3m", "buy:all", "all:month"; legacy "buy"/"all" mean this month only
+        [$what, $scopeKey] = array_pad(explode(':', $opt, 2), 2, 'month');
+        $from = '0000-00-00';
+        foreach (statement_scopes($p['rows']) as $sc) if ($sc['key'] === $scopeKey) $from = $sc['from'];
+        $entries = bot_statement_entries($p['rows'], $what === 'all', $from);
         if (!$entries) { $answer('Нечего импортировать'); return; }
         $ids = import_rows($entries, (int)$p['payer']);
         db()->prepare("UPDATE statement_jobs SET status='imported' WHERE id=?")->execute([(int)$p['job']]);
