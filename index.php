@@ -15,27 +15,45 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#f4f5f8">
+<meta name="theme-color" content="#F5F6F8">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Бюджет">
+<link rel="icon" href="favicon.ico" sizes="48x48">
+<link rel="icon" type="image/png" sizes="32x32" href="img/favicon-32.png">
+<link rel="apple-touch-icon" href="img/apple-touch-icon.png">
+<link rel="manifest" href="manifest.webmanifest">
 <meta name="description" content="Семейный бюджет — учёт расходов и доходов для всей семьи">
 <title>Семейный бюджет</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="app.css">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
 
 <div class="login" id="login" hidden>
-  <div class="login-card">
-    <div class="login-emoji">₸</div>
+  <section class="login-card" id="otpCard">
+    <img class="login-logo" src="img/logo-mark.png" alt="" width="64" height="64">
+    <div class="otp-eyebrow"><span class="pulse"></span> ВХОД ПО КОДУ</div>
     <h1>Семейный бюджет</h1>
-    <p>Отправьте команду <b>/login</b> боту <b><?php if ($botUser): ?><a href="https://t.me/<?= htmlspecialchars($botUser, ENT_QUOTES) ?>" target="_blank">@<?= htmlspecialchars($botUser, ENT_QUOTES) ?></a><?php else: ?>в Telegram<?php endif; ?></b> и введите полученный код.</p>
-    <div class="code-form" id="codeForm">
-      <input id="codeInput" type="text" inputmode="numeric" maxlength="6" placeholder="Код из бота" autocomplete="one-time-code" autofocus>
-      <div id="codeError" class="code-error" hidden></div>
-      <button id="codeSubmit" type="button" class="code-btn">Войти</button>
+    <p class="subtitle" id="otpSubtitle">Отправьте <b>/login</b> боту <?php if ($botUser): ?><a href="https://t.me/<?= htmlspecialchars($botUser, ENT_QUOTES) ?>" target="_blank" rel="noopener">@<?= htmlspecialchars($botUser, ENT_QUOTES) ?></a><?php else: ?>в Telegram<?php endif; ?> и введите 6‑значный код</p>
+
+    <div class="otp-stage" id="otpStage">
+      <input id="codeInput" class="otp-input" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" aria-label="Код из бота, 6 цифр" autofocus>
+      <div class="otp-slots" aria-hidden="true">
+        <div class="otp-slot"><span></span></div><div class="otp-slot"><span></span></div><div class="otp-slot"><span></span></div>
+        <div class="otp-slot"><span></span></div><div class="otp-slot"><span></span></div><div class="otp-slot"><span></span></div>
+      </div>
+      <div class="otp-stack" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+      <div class="otp-result" aria-hidden="true"><svg viewBox="0 0 48 48"><path d="m12 25 8 8 17-19"/></svg></div>
     </div>
+
+    <div class="status-line" aria-live="polite"><span class="status-dot"></span><span id="otpStatus">Ожидаю код</span></div>
+    <button id="codeSubmit" type="button" class="code-btn" disabled>Войти</button>
+    <p class="security-note" id="otpNote">Никому не сообщайте код из бота.</p>
     <?php if ($localDev): ?>
       <div class="login-local">
         <div>Локальный тестовый режим:</div>
@@ -45,14 +63,17 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
         </div>
       </div>
     <?php endif; ?>
-  </div>
+  </section>
 </div>
 
 <main class="shell" id="shell" hidden>
   <header class="topbar">
-    <div>
-      <div class="eyebrow">ВАШ ДОМ · ОБЩИЕ ФИНАНСЫ</div>
-      <h1>Бюджет</h1>
+    <div class="brand">
+      <img class="brand-logo" src="img/logo-mark.png" alt="" width="40" height="40">
+      <div>
+        <div class="eyebrow">Семейные финансы</div>
+        <h1>Бюджет</h1>
+      </div>
     </div>
     <div class="top-actions">
       <div class="user-switch" id="testUser" hidden>
@@ -118,34 +139,29 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
   </section>
 
   <section class="tab-panel" id="tab-reports" hidden>
-    <div class="card period-picker">
-      <div class="period-presets" id="presets">
-        <button data-preset="today">Сегодня</button>
-        <button data-preset="week">Неделя</button>
-        <button data-preset="month" class="selected">Месяц</button>
-        <button data-preset="year">Год</button>
-        <button data-preset="all">Всё время</button>
+    <div class="card report-nav">
+      <div class="period-stepper">
+        <button type="button" id="periodPrev" aria-label="Предыдущий период">‹</button>
+        <div class="period-title" aria-live="polite"><b id="periodTitle">—</b><span id="periodRange">—</span></div>
+        <button type="button" id="periodNext" aria-label="Следующий период">›</button>
       </div>
-      <div class="period-custom">
-        <button type="button" class="date-chip" id="dateFromBtn"><span>С</span><b id="dateFromLabel">—</b></button>
-        <button type="button" class="date-chip" id="dateToBtn"><span>По</span><b id="dateToLabel">—</b></button>
-        <button type="button" class="apply-btn" id="applyRange">Применить</button>
+      <div class="period-presets" id="presets">
+        <button type="button" data-preset="month" class="selected">Месяц</button>
+        <button type="button" data-preset="week">Неделя</button>
+        <button type="button" data-preset="year">Год</button>
+        <button type="button" data-preset="all">Всё время</button>
+        <button type="button" data-preset="custom">Свой период</button>
       </div>
     </div>
 
     <div class="hero card">
-      <div class="hero-top"><span>Расходы за период</span><span class="period" id="reportPeriod">—</span></div>
+      <div class="hero-top"><span id="reportHeroLabel">Потрачено</span><span class="period" id="reportPeriod">—</span></div>
       <div class="total"><strong id="reportExpenses">—</strong><span id="reportCurrency">KZT</span></div>
       <div class="hero-bottom">
         <div><span>Пополнения</span><b id="reportTopups">—</b></div>
-        <div><span>Изменение</span><b id="reportChange">—</b></div>
+        <div><span>Разница</span><b id="reportChange">—</b></div>
         <div><span>Операций</span><b id="reportCount">—</b></div>
       </div>
-    </div>
-
-    <div class="section">
-      <div class="section-title"><h2>Сравнение с прошлым периодом</h2></div>
-      <div id="comparison" class="card comparison"></div>
     </div>
 
     <div class="section">
@@ -154,39 +170,45 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
     </div>
 
     <div class="section">
-      <div class="section-title"><h2>Остатки на конец периода</h2></div>
-      <div id="reportBalances" class="balances-personal"></div>
-    </div>
-
-    <div class="section">
-      <div class="section-title"><h2>Участники</h2></div>
-      <div id="reportMembers" class="members"></div>
-    </div>
-
-    <div class="section">
       <div class="section-title">
         <h2>Категории</h2>
         <div class="filter-chips" id="categoryFilter">
-          <button data-filter="all" class="selected">Все</button>
-          <button data-filter="fixed">Обязательные</button>
-          <button data-filter="variable">Переменные</button>
+          <button type="button" data-filter="all" class="selected">Все</button>
+          <button type="button" data-filter="fixed">Обязательные</button>
+          <button type="button" data-filter="variable">Переменные</button>
         </div>
       </div>
       <div id="reportCategories" class="categories card"></div>
     </div>
 
     <div class="section">
-      <div class="section-title"><h2>Динамика по дням</h2></div>
+      <div class="section-title"><h2>Кто сколько потратил</h2></div>
+      <div id="reportMembers" class="members"></div>
+    </div>
+
+    <div class="section">
+      <div class="section-title"><h2>По дням</h2></div>
       <div id="chart" class="chart card"></div>
     </div>
 
     <div class="section">
       <div class="section-title">
-        <h2>История периода</h2>
-        <button class="text-button" id="export">Экспорт CSV</button>
+        <h2>Операции</h2>
+        <button type="button" class="text-button" id="export">Экспорт CSV</button>
       </div>
       <div id="reportHistory" class="history"></div>
       <div class="pagination" id="pagination"></div>
+    </div>
+
+    <div class="section">
+      <details class="card more" id="comparisonMore">
+        <summary><span>Сравнить с прошлым периодом<small id="comparisonHint">Скрыто, чтобы не мешать</small></span></summary>
+        <div id="comparison" class="comparison"></div>
+      </details>
+      <details class="card more" id="balancesMore">
+        <summary><span>Остатки на конец периода<small>Общий и личные балансы на последний день</small></span></summary>
+        <div id="reportBalances" class="balances-personal"></div>
+      </details>
     </div>
   </section>
 

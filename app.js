@@ -7,7 +7,8 @@ const symbols = {KZT:'₸',RUB:'₽',USD:'$',EUR:'€'};
 let testUserId = localStorage.getItem('fb_test_user') || '854102139';
 let categoryGroups = {fixed:[],variable:[]};
 let currency = 'KZT';
-let reportState = {preset:'month', from:null, to:null, page:1, filter:'all'};
+// preset: month|week|year|all|custom; anchor: any date inside the shown period; from/to only for custom
+let reportState = {preset:'month', anchor:null, from:null, to:null, page:1, filter:'all'};
 let mainCache = null;
 let reportCache = null;
 let mainAbort = null;
@@ -62,56 +63,83 @@ async function request(url, opts={}){
 function showShell(){ $('#login').hidden=true; $('#shell').hidden=false; $('#fab').hidden=false; document.body.classList.add('authorized'); }
 function showLogin(){ $('#login').hidden=false; $('#shell').hidden=true; $('#fab').hidden=true; document.body.classList.remove('authorized'); bindCodeAuth(); }
 
-/* ========== CODE AUTH ========== */
+/* ========== CODE AUTH (OTP) ========== */
+// Six slots mirror one real input (so paste and iOS code autofill work). On submit the
+// slots collapse into a stack, a checking badge pulses, then a check mark draws or the
+// slots come back with a shake.
+const wait = ms => new Promise(r => setTimeout(r, ms));
+let otpBound = false;
+
 function bindCodeAuth(){
   const input = $('#codeInput');
   const btn = $('#codeSubmit');
-  const err = $('#codeError');
-  if (!input || !btn) return;
+  if (!input || otpBound) return;
+  otpBound = true;
+  const card = $('#otpCard');
+  const stage = $('#otpStage');
+  const slots = $$('#otpStage .otp-slot');
+  const status = $('#otpStatus');
+  let busy = false;
 
-  // Auto-format: only digits, max 6
-  input.oninput = () => {
-    input.value = input.value.replace(/\D/g, '').slice(0, 6);
-    err.hidden = true;
-  };
-  input.onkeydown = (e) => { if (e.key === 'Enter') submitCode(); };
-  btn.onclick = submitCode;
-
-  async function submitCode(){
-    const code = input.value.trim();
-    if (code.length !== 6) { showCodeError('Введите 6-значный код'); return; }
-    btn.disabled = true;
-    btn.textContent = 'Проверяю…';
-    err.hidden = true;
-    try {
-      const r = await fetch('auth.php', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({code}),
-        credentials: 'same-origin',
-      });
-      const d = await r.json();
-      if (r.ok && d.ok) {
-        // Success — reload to enter the app
-        location.reload();
-      } else {
-        showCodeError(d.error || 'Неверный код');
-        input.value = '';
-        input.focus();
-      }
-    } catch(e) {
-      showCodeError('Ошибка сети. Попробуйте позже.');
-    } finally {
-      btn.disabled = false;
-      btn.textContent = 'Войти';
-    }
+  const setStatus = text => { status.textContent = text; };
+  function paint(popIndex = -1){
+    const v = input.value;
+    slots.forEach((slot, i) => {
+      const span = slot.querySelector('span');
+      span.textContent = v[i] || '';
+      span.classList.toggle('pop', i === popIndex);
+      slot.classList.toggle('active', i === Math.min(v.length, 5) && document.activeElement === input);
+    });
+    btn.disabled = v.length !== 6 || busy;
   }
 
-  function showCodeError(msg){
-    err.textContent = msg;
-    err.hidden = false;
-    input.classList.add('shake');
-    setTimeout(() => input.classList.remove('shake'), 400);
+  input.addEventListener('input', () => {
+    if (busy) return;
+    const before = input.value;
+    input.value = before.replace(/\D/g, '').slice(0, 6);
+    card.classList.remove('is-error');
+    setStatus(input.value.length ? `Введено ${input.value.length} из 6` : 'Ожидаю код');
+    paint(input.value.length - 1);
+    if (input.value.length === 6) submitCode();
+  });
+  input.addEventListener('focus', () => { stage.classList.add('is-focused'); paint(); });
+  input.addEventListener('blur', () => { stage.classList.remove('is-focused'); paint(); });
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') submitCode(); });
+  btn.onclick = submitCode;
+  paint();
+
+  async function submitCode(){
+    const code = input.value;
+    if (busy || code.length !== 6) return;
+    busy = true;
+    paint();
+    input.blur();
+    card.classList.remove('is-error', 'is-verified', 'is-checking');
+    stage.classList.add('is-collapsing');
+    setStatus('Код получен');
+    const request = fetch('auth.php', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({code}), credentials: 'same-origin',
+    }).then(async r => ({ok: r.ok, d: await r.json().catch(() => ({}))})).catch(() => ({ok: false, d: {error: 'Нет связи. Попробуйте ещё раз.'}}));
+    await wait(480);
+    card.classList.add('is-checking');
+    setStatus('Проверяю код…');
+    const [res] = await Promise.all([request, wait(500)]);
+    card.classList.remove('is-checking');
+    if (res.ok && res.d.ok) {
+      card.classList.add('is-verified');
+      setStatus(`Добро пожаловать${res.d.name ? ', ' + res.d.name : ''}`);
+      $('#otpNote').textContent = 'Открываю бюджет…';
+      await wait(900);
+      location.reload();
+      return;
+    }
+    stage.classList.remove('is-collapsing');
+    card.classList.add('is-error');
+    setStatus(res.d.error || 'Неверный код');
+    input.value = '';
+    busy = false;
+    paint();
+    input.focus();
   }
 }
 
@@ -558,14 +586,12 @@ function openRangeCalendar(target){
   $('#rangeCalHint').textContent = target === 'from' ? 'Выберите дату начала' : 'Выберите дату конца';
   rangeCal = buildCalendar($('#rangeCalDays'), $('#rangeCalTitle'), {
     mode: 'range',
-    initial: (target === 'from' ? reportState.from : reportState.to) || todayISO(),
-    rangeFrom: reportState.from,
-    rangeTo: reportState.to,
+    initial: periodRange().from === '1970-01-01' ? todayISO() : periodRange().from,
+    rangeFrom: periodRange().from === '1970-01-01' ? null : periodRange().from,
+    rangeTo: periodRange().from === '1970-01-01' ? null : periodRange().to,
     prevBtn: $('#rangeCalPrev'),
     nextBtn: $('#rangeCalNext'),
     onRangeChange(f, t){
-      if (f) reportState.from = f;
-      if (t) reportState.to = t;
       $('#rangeCalHint').textContent = f && t ? `${fmtDate(f)} — ${fmtDate(t)}` : (f ? 'Теперь выберите дату конца' : 'Выберите дату начала');
       $('#rangeCalApply').disabled = !(f && t);
     }
@@ -577,27 +603,59 @@ $('#rangeCalCancel').onclick = closeRangeCalendar;
 $('#rangeCalApply').onclick = () => {
   const [f, t] = rangeCal.getRange();
   if (f && t) {
-    reportState.from = f; reportState.to = t; reportState.page = 1;
-    $$('#presets button').forEach(x => x.classList.remove('selected'));
-    updateRangeLabels();
+    reportState.preset = 'custom'; reportState.from = f; reportState.to = t; reportState.page = 1;
+    $$('#presets button').forEach(x => x.classList.toggle('selected', x.dataset.preset === 'custom'));
     closeRangeCalendar();
     loadReport().catch(()=>{});
   }
 };
 
-function updateRangeLabels(){
-  $('#dateFromLabel').textContent = reportState.from ? fmtDate(reportState.from) : '—';
-  $('#dateToLabel').textContent = reportState.to ? fmtDate(reportState.to) : '—';
+const MONTHS_GEN = ['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
+const dayMonth = iso => { const [, m, d] = iso.split('-'); return `${Number(d)} ${MONTHS_SHORT[Number(m) - 1]}`; };
+
+// The period the report shows: one whole month/week/year that can be stepped through
+function periodRange(state = reportState){
+  const a = new Date((state.anchor || todayISO()) + 'T00:00:00');
+  if (state.preset === 'week') {
+    const from = new Date(a); from.setDate(a.getDate() - (a.getDay() + 6) % 7);
+    const to = new Date(from); to.setDate(from.getDate() + 6);
+    return {from: ymd(from), to: ymd(to), title: `${dayMonth(ymd(from))} — ${dayMonth(ymd(to))}`, sub: 'Неделя', step: true};
+  }
+  if (state.preset === 'year') {
+    return {from: `${a.getFullYear()}-01-01`, to: `${a.getFullYear()}-12-31`, title: String(a.getFullYear()), sub: 'Год', step: true};
+  }
+  if (state.preset === 'all') return {from: '1970-01-01', to: todayISO(), title: 'Всё время', sub: 'Все операции', step: false};
+  if (state.preset === 'custom' && state.from && state.to) {
+    return {from: state.from, to: state.to, title: `${dayMonth(state.from)} — ${dayMonth(state.to)}`, sub: 'Свой период', step: false};
+  }
+  const from = new Date(a.getFullYear(), a.getMonth(), 1);
+  const to = new Date(a.getFullYear(), a.getMonth() + 1, 0);
+  return {from: ymd(from), to: ymd(to), title: `${MONTHS[a.getMonth()]} ${a.getFullYear()}`, sub: `1 — ${to.getDate()} ${MONTHS_GEN[a.getMonth()]}`, step: true};
 }
 
-$('#dateFromBtn').onclick = () => openRangeCalendar('from');
-$('#dateToBtn').onclick = () => openRangeCalendar('to');
-$('#applyRange').onclick = () => {
-  if (!reportState.from || !reportState.to) { notice('Выберите обе даты'); return; }
-  $$('#presets button').forEach(x => x.classList.remove('selected'));
+function shiftPeriod(dir){
+  const a = new Date((reportState.anchor || todayISO()) + 'T00:00:00');
+  if (reportState.preset === 'week') a.setDate(a.getDate() + 7 * dir);
+  else if (reportState.preset === 'year') a.setFullYear(a.getFullYear() + dir, 0, 1);
+  else a.setMonth(a.getMonth() + dir, 1);
+  reportState.anchor = ymd(a);
   reportState.page = 1;
   loadReport().catch(()=>{});
-};
+}
+
+function renderPeriodNav(){
+  const r = periodRange();
+  $('#periodTitle').textContent = r.title;
+  $('#periodRange').textContent = r.sub;
+  $('#periodPrev').style.visibility = r.step ? '' : 'hidden';
+  $('#periodNext').style.visibility = r.step ? '' : 'hidden';
+  // Nothing to show after the current period
+  $('#periodNext').disabled = !r.step || r.to >= todayISO();
+  $('#reportHeroLabel').textContent = reportState.preset === 'month' ? `Потрачено за ${MONTHS[new Date(r.from + 'T00:00:00').getMonth()].toLowerCase()}` : 'Потрачено';
+}
+
+$('#periodPrev').onclick = () => shiftPeriod(-1);
+$('#periodNext').onclick = () => shiftPeriod(1);
 
 function renderReport(d){
   reportCache = d;
@@ -612,8 +670,8 @@ function renderReport(d){
   $('#reportChange').textContent = sign + money(d.summary.balance_change) + ' ' + c;
   $('#reportChange').style.color = d.summary.balance_change < 0 ? '#ffbec5' : '#c6f3df';
   $('#reportCount').textContent = d.summary.count;
-  reportState.from = d.from; reportState.to = d.to;
-  updateRangeLabels();
+  renderPeriodNav();
+  $('#comparisonHint').textContent = `Прошлый период: ${fmtDate(d.previous.from)} — ${fmtDate(d.previous.to)}`;
 
   const p = d.previous;
   const delta = (cur, prev) => prev > 0 ? ((cur - prev) / prev * 100) : (cur > 0 ? 100 : 0);
@@ -760,12 +818,9 @@ function renderPagination(p){
 function buildReportUrl(){
   const u = new URL('api.php', location.href);
   u.searchParams.set('action','report');
-  if (reportState.from && reportState.to) {
-    u.searchParams.set('from', reportState.from);
-    u.searchParams.set('to', reportState.to);
-  } else {
-    u.searchParams.set('preset', reportState.preset);
-  }
+  const r = periodRange();
+  if (reportState.preset === 'all') u.searchParams.set('preset', 'all');
+  else { u.searchParams.set('from', r.from); u.searchParams.set('to', r.to); }
   u.searchParams.set('page', reportState.page);
   u.searchParams.set('limit', 50);
   return u.toString();
@@ -774,6 +829,7 @@ function buildReportUrl(){
 async function loadReport(){
   if (reportAbort) reportAbort.abort();
   reportAbort = new AbortController();
+  renderPeriodNav();
   try {
     const d = await request(buildReportUrl(), {signal: reportAbort.signal});
     renderReport(d);
@@ -1159,10 +1215,10 @@ if (tg?.initDataUnsafe?.user) $('#avatar').textContent = (tg.initDataUnsafe.user
 
 $$('.main-tabs button').forEach(b => b.onclick = () => switchTab(b.dataset.tab));
 $$('#presets button').forEach(b => b.onclick = () => {
+  if (b.dataset.preset === 'custom') { openRangeCalendar('from'); return; }
   $$('#presets button').forEach(x => x.classList.toggle('selected', x === b));
   reportState.preset = b.dataset.preset;
-  reportState.from = null;
-  reportState.to = null;
+  reportState.anchor = todayISO();
   reportState.page = 1;
   loadReport().catch(()=>{});
 });

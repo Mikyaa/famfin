@@ -1,0 +1,1 @@
+Inter by Rasmus Andersson — SIL Open Font License 1.1 (https://openfontlicense.org). Static TTFs from Google Fonts, used by report_image.php.
