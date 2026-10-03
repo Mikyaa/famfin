@@ -1613,7 +1613,7 @@ function renderImportRows(){
       <input type="checkbox" data-i="${i}" ${r.include ? 'checked' : ''}>
       <span class="import-main">
         <span class="import-top"><b>${safe(r.note || r.type)}</b><b class="tx-amount ${r.kind}">${r.kind === 'expense' ? '−' : '+'}${money(r.amount)}</b></span>
-        <span class="import-meta">${fmtDate(r.date)} · ${safe(r.type)}${r.duplicate ? ' · <em>уже есть в бюджете</em>' : ''}</span>
+        <span class="import-meta">${fmtDate(r.date)} · ${safe(r.type)}${r.dup === 'imported' ? ' · <em>уже импортирована раньше</em>' : r.dup === 'manual' ? ' · <em>уже записана вручную</em>' : ''}</span>
         <select data-cat="${i}" aria-label="Категория">${cats.map(x => `<option ${x === r.category ? 'selected' : ''}>${safe(x)}</option>`).join('')}</select>
       </span>
     </label>`;
@@ -1630,11 +1630,12 @@ function syncImportSummary(){
   $('#importConfirm').textContent = sel.length ? `Импортировать ${sel.length}` : 'Ничего не выбрано';
 }
 $('#importConfirm').onclick = async () => {
-  const rows = importRows.filter(r => r.include).map(r => ({kind: r.kind, amount: r.amount, category: r.category, note: r.note, date: r.date}));
+  const rows = importRows.filter(r => r.include).map(r => ({kind: r.kind, amount: r.amount, category: r.category, note: r.note, date: r.date, key: r.key, type: r.type}));
   const btn = $('#importConfirm'); btn.disabled = true;
   try {
     const d = await request('api.php?action=import', {method:'POST', body: JSON.stringify({rows, payer_id: importPayer})});
-    haptic('success'); notice(`Импортировано операций: ${d.imported} ✓`, true);
+    haptic('success');
+    notice(`Импортировано: ${d.imported}` + (d.linked ? ` · совпали с ручными: ${d.linked}` : '') + (d.skipped ? ` · уже были: ${d.skipped}` : '') + ' ✓', true);
     await closeImport(); await reloadAfterChange();
   } catch(e) { haptic('error'); notice(e.message); btn.disabled = false; }
 };

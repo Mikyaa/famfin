@@ -226,8 +226,8 @@ try {
   if ($method === 'POST' && $action === 'import') {
     $d = body();
     if (!is_array($d['rows'] ?? null)) json_out(['error'=>'Нет данных'], 422);
-    $ids = import_rows($d['rows'], (int)($d['payer_id'] ?? $member['id']));
-    json_out(['ok'=>true, 'imported'=>count($ids)]);
+    $res = import_rows($d['rows'], (int)($d['payer_id'] ?? $member['id']));
+    json_out(['ok'=>true, 'imported'=>count($res['ids']), 'linked'=>count($res['linked']), 'skipped'=>$res['skipped']]);
   }
 
   if ($method === 'POST' && $action === 'main') {

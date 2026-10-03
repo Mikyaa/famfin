@@ -25,5 +25,5 @@ foreach (statement_list_messages($rows) as $chunk) fwrite(STDOUT, $chunk);
 if (!isset($opts['apply'])) { fwrite(STDOUT, "\nDry run. Add --apply to import.\n"); exit(0); }
 $entries = bot_statement_entries($rows, isset($opts['all']), (string)($opts['from'] ?? '0000-00-00'));
 if (!$entries) { fwrite(STDOUT, "\nNothing new to import.\n"); exit(0); }
-$ids = import_rows($entries, $payer);
-fwrite(STDOUT, "\nImported " . count($ids) . " operations for " . user_label($payer) . " (ids " . min($ids) . "–" . max($ids) . ")\n");
+$res = import_rows($entries, $payer);
+fwrite(STDOUT, "\nImported " . count($res['ids']) . " new, linked " . count($res['linked']) . " manual, skipped " . $res['skipped'] . " imported before (" . user_label($payer) . ")\n");

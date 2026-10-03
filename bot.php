@@ -140,13 +140,33 @@ function bot_handle_document(int $chatId, int $userId, array $doc): void {
     ->execute([$userId, $chatId, (string)$doc['file_id'], mb_substr($name, 0, 200), $r['result']['message_id'] ?? null]);
 }
 
+// Rows of the chosen window; import_rows() itself skips or links what is already in the budget
 function bot_statement_entries(array $rows, bool $all, string $from = '0000-00-00'): array {
   $out = [];
-  foreach ($rows as $r) {
-    if ($r['duplicate'] || (!$all && !$r['purchase']) || $r['date'] < $from) continue;
-    $out[] = ['kind' => $r['kind'], 'amount' => $r['amount'], 'category' => $r['category'], 'note' => $r['note'], 'date' => $r['date']];
+  foreach (statement_keys($rows) as $r) {
+    if ((!$all && !$r['purchase']) || $r['date'] < $from) continue;
+    $out[] = ['kind' => $r['kind'], 'amount' => $r['amount'], 'category' => $r['category'], 'note' => $r['note'], 'date' => $r['date'], 'key' => $r['key']];
   }
   return $out;
+}
+
+function bot_import_report(array $res, array $entries, int $payer): string {
+  $created = array_flip($res['ids']);
+  $lines = ['✅ Импорт · ' . user_label($payer), 'Новых операций: ' . count($res['ids'])];
+  if ($res['ids']) {
+    $byId = [];
+    $sumExp = 0.0; $sumTop = 0.0;
+    $q = db()->prepare('SELECT kind,amount FROM transactions WHERE id IN (' . implode(',', array_map('intval', $res['ids'])) . ')');
+    $q->execute();
+    foreach ($q as $t) { if ($t['kind'] === 'expense') $sumExp += (float)$t['amount']; else $sumTop += (float)$t['amount']; }
+    if ($sumExp) $lines[] = '   расходы ' . fmt_money($sumExp);
+    if ($sumTop) $lines[] = '   пополнения ' . fmt_money($sumTop);
+  }
+  if ($res['linked']) $lines[] = '✋ Совпали с записанными вручную: ' . count($res['linked']) . ' — не задвоены, отмечены как из выписки';
+  if ($res['skipped']) $lines[] = '♻️ Уже были импортированы раньше: ' . $res['skipped'] . ' — пропущены';
+  $lines[] = '';
+  $lines[] = 'Категории можно поправить в приложении — нажмите на операцию.';
+  return implode("\n", $lines);
 }
 
 /* ========== CALLBACKS ========== */
@@ -200,10 +220,7 @@ function bot_handle_callback(array $cb): void {
         $answer($opt === '__back' ? '' : 'Готово');
         return;
       case 'statement':
-        $job = db()->prepare('SELECT status FROM statement_jobs WHERE id=?');
-        $job->execute([(int)$p['job']]);
-        $status = $job->fetchColumn();
-        if ($status === 'imported') { $answer('Эта выписка уже импортирована'); return; }
+        // Several imports from one statement are safe: source labels filter what came in before
         if ($opt === 'cancel') { $edit('✖️ Импорт отменён — ничего не записано'); $answer(); return; }
         if ($opt === 'list') {
           foreach (statement_list_messages($p['rows']) as $chunk) telegram('sendMessage', ['chat_id' => $chatId, 'text' => "🛒 покупка · ↔️ перевод/пополнение · ♻️ уже есть\n\n" . $chunk]);
@@ -224,19 +241,18 @@ function bot_handle_callback(array $cb): void {
         foreach (statement_scopes($p['rows']) as $sc) if ($sc['key'] === $scopeKey) $from = $sc['from'];
         $entries = bot_statement_entries($p['rows'], $what === 'all', $from);
         if (!$entries) { $answer('Нечего импортировать'); return; }
-        $ids = import_rows($entries, (int)$p['payer']);
+        $res = import_rows($entries, (int)$p['payer']);
+        // Nothing new: keep the message (and any earlier "undo" button) as it is
+        if (!$res['ids'] && !$res['linked']) { $answer('Всё из этой выписки уже в бюджете'); return; }
         db()->prepare("UPDATE statement_jobs SET status='imported' WHERE id=?")->execute([(int)$p['job']]);
-        $sumExp = array_sum(array_map(fn($e) => $e['kind'] === 'expense' ? $e['amount'] : 0, $entries));
-        $sumTop = array_sum(array_map(fn($e) => $e['kind'] === 'topup' ? $e['amount'] : 0, $entries));
-        $text = '✅ Импортировано операций: ' . count($ids) . ' · ' . user_label((int)$p['payer']) . "\nРасходы: " . fmt_money($sumExp) . ($sumTop ? "\nПополнения: " . fmt_money($sumTop) : '') . "\n\nКатегории можно поправить в приложении — нажмите на операцию.";
-        $edit($text, bot_keyboard($userId, ['type' => 'statement_undo', 'ids' => $ids, 'job' => (int)$p['job'], 'opts' => ['undo']], ['↩️ Отменить импорт']));
-        $answer('Готово');
+        $undo = ($res['ids'] || $res['linked']) ? bot_keyboard($userId, ['type' => 'statement_undo', 'ids' => $res['ids'], 'linked' => $res['linked'], 'job' => (int)$p['job'], 'opts' => ['undo']], ['↩️ Отменить импорт']) : null;
+        $edit(bot_import_report($res, $entries, (int)$p['payer']), $undo);
+        $answer($res['ids'] ? 'Готово' : 'Новых операций нет');
         return;
       case 'statement_undo':
-        $n = 0;
-        foreach ($p['ids'] as $id) if (delete_transaction((int)$id)) $n++;
+        $n = undo_import($p['ids'] ?? [], $p['linked'] ?? []);
         db()->prepare("UPDATE statement_jobs SET status='undone' WHERE id=?")->execute([(int)$p['job']]);
-        $edit("↩️ Импорт отменён: удалено операций — $n");
+        $edit("↩️ Импорт отменён: удалено операций — $n" . (!empty($p['linked']) ? ', с ручных записей снята отметка источника — ' . count($p['linked']) : ''));
         $answer('Отменено');
         return;
       case 'rec':

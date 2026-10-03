@@ -13,6 +13,8 @@ function features_schema(PDO $pdo): void {
     $pdo->exec("CREATE TABLE IF NOT EXISTS recurring(id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL DEFAULT 'expense',amount NUMERIC NOT NULL,category TEXT NOT NULL,category_group TEXT NULL,note TEXT NOT NULL DEFAULT '',day INTEGER NOT NULL,payer_id INTEGER NOT NULL DEFAULT 0,active INTEGER NOT NULL DEFAULT 1,done_period TEXT NULL,skipped_period TEXT NULL,reminded_period TEXT NULL,created_by INTEGER NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);");
     $pdo->exec("CREATE TABLE IF NOT EXISTS bot_actions(id INTEGER PRIMARY KEY AUTOINCREMENT,telegram_id INTEGER NOT NULL,payload TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);");
     if (!has_column($pdo, 'transactions', 'recurring_id')) $pdo->exec("ALTER TABLE transactions ADD COLUMN recurring_id INTEGER NULL;");
+    if (!has_column($pdo, 'transactions', 'import_key')) $pdo->exec("ALTER TABLE transactions ADD COLUMN import_key TEXT NULL;");
+    $pdo->exec("CREATE INDEX IF NOT EXISTS idx_tx_import_key ON transactions(import_key);");
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_transfers_date ON transfers(occurred_on);");
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_goal_moves_goal ON goal_moves(goal_id);");
     statement_jobs_schema($pdo);
@@ -25,6 +27,10 @@ function features_schema(PDO $pdo): void {
   $pdo->exec("CREATE TABLE IF NOT EXISTS recurring(id BIGINT AUTO_INCREMENT PRIMARY KEY,kind VARCHAR(8) NOT NULL DEFAULT 'expense',amount DECIMAL(14,2) NOT NULL,category VARCHAR(80) NOT NULL,category_group VARCHAR(16) NULL,note VARCHAR(500) NOT NULL DEFAULT '',day TINYINT NOT NULL,payer_id BIGINT NOT NULL DEFAULT 0,active TINYINT NOT NULL DEFAULT 1,done_period CHAR(7) NULL,skipped_period CHAR(7) NULL,reminded_period CHAR(7) NULL,created_by BIGINT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) $cs");
   $pdo->exec("CREATE TABLE IF NOT EXISTS bot_actions(id BIGINT AUTO_INCREMENT PRIMARY KEY,telegram_id BIGINT NOT NULL,payload TEXT NOT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) $cs");
   if (!has_column($pdo, 'transactions', 'recurring_id')) $pdo->exec("ALTER TABLE transactions ADD COLUMN recurring_id BIGINT NULL");
+  if (!has_column($pdo, 'transactions', 'import_key')) {
+    $pdo->exec("ALTER TABLE transactions ADD COLUMN import_key CHAR(40) NULL");
+    $pdo->exec("CREATE INDEX transactions_import_key_idx ON transactions(import_key)");
+  }
   statement_jobs_schema($pdo);
 }
 
@@ -386,7 +392,7 @@ function search_operations(string $query, int $limit = 100): array {
 
 /* ========== BANK STATEMENT IMPORT ========== */
 // Parses text of a Kaspi Gold statement ("01.10.26  - 3 450,00 ₸  Покупка  MAGNUM ...").
-// Purchases are pre-selected; transfers, top-ups and withdrawals are offered unticked.
+// Purchases are pre-selected; transfers, top-ups, withdrawals and duplicates are offered unticked.
 function parse_bank_statement(string $text, int $payerId): array {
   $text = str_replace(["\u{00A0}", "\u{2009}", "\u{202F}", "\r"], [' ', ' ', ' ', ''], $text);
   $re = '/(\d{2})\.(\d{2})\.(\d{2}|\d{4})\s+([+\-−–])\s*(\d[\d ]*(?:[.,]\d{1,2})?)\s*(?:₸|т\b|тг|KZT)?\s+(Покупк[аи]|Пополнени[ея]|Поступлени[ея]|Перевод[ы]?|Сняти[ея]|Разное|Плат[её]ж[и]?|Оплата)\s*([^\n]*)/u';
@@ -403,47 +409,117 @@ function parse_bank_statement(string $text, int $payerId): array {
     $details = trim(preg_replace('/\s{2,}/u', ' ', $x[7]));
     $kind = $sign === '+' ? 'topup' : 'expense';
     $isPurchase = str_starts_with($type, 'покупк') || str_starts_with($type, 'плат') || str_starts_with($type, 'оплат');
-    $category = $kind === 'topup' ? 'Пополнение' : (categorize_text($details) ?? ($isPurchase ? 'Другое' : 'Другое'));
+    $category = $kind === 'topup' ? 'Пополнение' : (categorize_text($details) ?? 'Другое');
     $rows[] = ['date' => $date, 'kind' => $kind, 'amount' => $amount, 'type' => $x[6], 'note' => mb_substr($details, 0, 200),
       'category' => $category, 'group' => category_group_of($category), 'purchase' => $isPurchase && $kind === 'expense',
-      'include' => $isPurchase && $kind === 'expense', 'duplicate' => false];
+      'include' => $isPurchase && $kind === 'expense', 'duplicate' => false, 'dup' => null];
   }
-  return mark_statement_duplicates($rows, $payerId);
+  return mark_statement_duplicates(statement_keys($rows), $payerId);
 }
 
-// Operations that already exist for this member (same date, kind and amount) are duplicates
+// Source label of a statement line: date, kind, amount, operation and counterparty, plus the
+// occurrence number for identical lines (two equal bus tickets on one day get keys #1 and #2).
+// The member is not part of it, so a statement imported again under another name is still known.
+function statement_keys(array $rows): array {
+  $seen = [];
+  foreach ($rows as &$r) {
+    if (!empty($r['key'])) continue;
+    $base = implode('|', [$r['date'], $r['kind'], number_format((float)$r['amount'], 2, '.', ''), mb_strtolower((string)$r['type']), mb_strtolower(preg_replace('/\s+/u', ' ', trim((string)$r['note'])))]);
+    $seen[$base] = ($seen[$base] ?? 0) + 1;
+    $r['key'] = sha1($base . '|' . $seen[$base]);
+  }
+  unset($r);
+  return $rows;
+}
+
+function existing_import_keys(array $keys): array {
+  $found = [];
+  foreach (array_chunk(array_values(array_unique(array_filter($keys))), 400) as $chunk) {
+    $q = db()->prepare('SELECT import_key FROM transactions WHERE import_key IN (' . implode(',', array_fill(0, count($chunk), '?')) . ')');
+    $q->execute($chunk);
+    foreach ($q->fetchAll(PDO::FETCH_COLUMN) as $k) $found[$k] = true;
+  }
+  return $found;
+}
+
+// Manual operations (no source label) of this member that match exactly by date, kind and amount
+function manual_matches(int $payerId, string $from, string $to): array {
+  $q = db()->prepare('SELECT id,occurred_on,kind,amount FROM transactions WHERE import_key IS NULL AND telegram_id=? AND occurred_on>=? AND occurred_on<=? ORDER BY id');
+  $q->execute([$payerId, $from, $to]);
+  $pool = [];
+  foreach ($q as $r) $pool[$r['occurred_on'] . '|' . $r['kind'] . '|' . number_format((float)$r['amount'], 2, '.', '')][] = (int)$r['id'];
+  return $pool;
+}
+
+// dup = 'imported' (label already in the budget) or 'manual' (same entry typed by hand)
 function mark_statement_duplicates(array $rows, int $payerId): array {
   if (!$rows) return [];
+  $rows = statement_keys($rows);
   $dates = array_column($rows, 'date');
-  $q = db()->prepare('SELECT occurred_on,kind,amount FROM transactions WHERE occurred_on>=? AND occurred_on<=? AND telegram_id=?');
-  $q->execute([min($dates), max($dates), $payerId]);
-  $existing = [];
-  foreach ($q as $r) { $k = $r['occurred_on'] . '|' . $r['kind'] . '|' . number_format((float)$r['amount'], 2, '.', ''); $existing[$k] = ($existing[$k] ?? 0) + 1; }
+  $known = existing_import_keys(array_column($rows, 'key'));
+  $pool = manual_matches($payerId, min($dates), max($dates));
   foreach ($rows as &$row) {
-    $k = $row['date'] . '|' . $row['kind'] . '|' . number_format((float)$row['amount'], 2, '.', '');
-    $row['duplicate'] = false;
-    $row['include'] = !empty($row['purchase']);
-    if (($existing[$k] ?? 0) > 0) { $existing[$k]--; $row['duplicate'] = true; $row['include'] = false; }
+    $row['dup'] = null;
+    if (isset($known[$row['key']])) $row['dup'] = 'imported';
+    else {
+      $k = $row['date'] . '|' . $row['kind'] . '|' . number_format((float)$row['amount'], 2, '.', '');
+      if (!empty($pool[$k])) { array_shift($pool[$k]); $row['dup'] = 'manual'; }
+    }
+    $row['duplicate'] = $row['dup'] !== null;
+    $row['include'] = !empty($row['purchase']) && !$row['duplicate'];
   }
   unset($row);
   return $rows;
 }
 
-// Returns the ids of the created operations (so a bot import can be undone)
+// Imports statement rows against the current state of the budget:
+// a known source label is skipped, an exact manual entry gets the label instead of a copy,
+// everything else is inserted with its label. Returns ids for "undo import".
 function import_rows(array $rows, int $payerId): array {
   if (!is_member_id($payerId)) throw new RuntimeException('Неверный участник');
-  if (count($rows) > 2000) throw new RuntimeException('Слишком много строк за раз');
+  if (count($rows) > 3000) throw new RuntimeException('Слишком много строк за раз');
+  $rows = statement_keys(array_values(array_filter($rows, 'is_array')));
   $entries = [];
   foreach ($rows as $i => $r) {
-    try { $entries[] = validate_entry(is_array($r) ? $r : []); }
+    try { $entries[] = validate_entry($r) + ['key' => $r['key']]; }
     catch (RuntimeException $e) { throw new RuntimeException('Строка ' . ($i + 1) . ': ' . $e->getMessage()); }
   }
+  $result = ['ids' => [], 'linked' => [], 'skipped' => 0];
+  if (!$entries) return $result;
   $pdo = db();
   $pdo->beginTransaction();
-  $ids = [];
-  try { foreach ($entries as $e) $ids[] = insert_transaction($payerId, $e); $pdo->commit(); }
-  catch (Throwable $e) { $pdo->rollBack(); throw $e; }
-  return $ids;
+  try {
+    $known = existing_import_keys(array_column($entries, 'key'));
+    $dates = array_column($entries, 'date');
+    $pool = manual_matches($payerId, min($dates), max($dates));
+    $insert = $pdo->prepare('INSERT INTO transactions(telegram_id,kind,amount,category,category_group,note,occurred_on,import_key) VALUES(?,?,?,?,?,?,?,?)');
+    $link = $pdo->prepare('UPDATE transactions SET import_key=? WHERE id=? AND import_key IS NULL');
+    foreach ($entries as $e) {
+      if (isset($known[$e['key']])) { $result['skipped']++; continue; }
+      $k = $e['date'] . '|' . $e['kind'] . '|' . number_format((float)$e['amount'], 2, '.', '');
+      if (!empty($pool[$k])) {
+        $id = array_shift($pool[$k]);
+        $link->execute([$e['key'], $id]);
+        $result['linked'][] = $id;
+      } else {
+        $insert->execute([$payerId, $e['kind'], $e['amount'], $e['category'], $e['group'], $e['note'], $e['date'], $e['key']]);
+        $result['ids'][] = (int)$pdo->lastInsertId();
+      }
+      $known[$e['key']] = true;
+    }
+    $pdo->commit();
+  } catch (Throwable $e) { $pdo->rollBack(); throw $e; }
+  if ($result['ids']) mark_balance_changed();
+  return $result;
+}
+
+// "Undo import": removes created operations and unlinks manual ones
+function undo_import(array $ids, array $linked): int {
+  $n = 0;
+  foreach ($ids as $id) if (delete_transaction((int)$id)) $n++;
+  $q = db()->prepare('UPDATE transactions SET import_key=NULL WHERE id=?');
+  foreach ($linked as $id) $q->execute([(int)$id]);
+  return $n;
 }
 
 /* ========== TELEGRAM UPLOADS ========== */
@@ -577,7 +653,10 @@ function statement_summary(array $rows, int $payerId, string $fileName = ''): st
   $unknown = count(array_filter($buy, fn($r) => $r['category'] === 'Другое'));
   if ($unknown) $lines[] = "   ($unknown без категории — попадут в «Другое», можно поправить в приложении)";
   if ($other) $lines[] = '↔️ Переводы, пополнения, снятия: ' . count($other) . ' — по умолчанию не импортирую';
-  if ($dups) $lines[] = '♻️ Уже есть в бюджете: ' . count($dups) . ' — пропущу';
+  $prev = count(array_filter($dups, fn($r) => ($r['dup'] ?? '') === 'imported'));
+  $manual = count($dups) - $prev;
+  if ($prev) $lines[] = '♻️ Уже импортированы раньше: ' . $prev . ' — пропущу';
+  if ($manual) $lines[] = '✋ Уже записаны вручную (та же дата и сумма): ' . $manual . ' — не задвою, только отмечу источник';
   if ((new DateTimeImmutable(min($dates)))->diff(new DateTimeImmutable(max($dates)))->days > 62) {
     $lines[] = '';
     $lines[] = '⚠️ Выписка за большой период. Покупки уменьшают общий остаток, поэтому за прошлые месяцы импортируйте их, только если внесли и пополнения за те же месяцы. Для начала учёта обычно хватает текущего месяца.';
@@ -621,7 +700,7 @@ function statement_list_messages(array $rows): array {
   $out = []; $buf = '';
   foreach ($rows as $r) {
     $d = (new DateTimeImmutable($r['date']))->format('d.m');
-    $mark = $r['duplicate'] ? '♻️' : ($r['purchase'] ? '🛒' : '↔️');
+    $mark = ($r['dup'] ?? null) === 'imported' ? '♻️' : (($r['dup'] ?? null) === 'manual' ? '✋' : ($r['purchase'] ? '🛒' : '↔️'));
     $line = "$mark $d " . ($r['kind'] === 'expense' ? '−' : '+') . number_format($r['amount'], 0, ',', ' ') . " · {$r['category']} · " . mb_substr($r['note'] ?: $r['type'], 0, 40) . "\n";
     if (mb_strlen($buf . $line) > 3800) { $out[] = $buf; $buf = ''; }
     $buf .= $line;
