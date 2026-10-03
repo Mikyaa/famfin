@@ -1,6 +1,6 @@
 <?php
 require __DIR__.'/lib.php';
-header("Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org; base-uri 'self'; form-action 'self'");
+header("Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org https://cdnjs.cloudflare.com; worker-src 'self' blob: https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org; base-uri 'self'; form-action 'self'");
 header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: strict-origin-when-cross-origin');
 // Set bot_username in config.php to skip the getMe round-trip on every page load
@@ -24,6 +24,7 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
 <link rel="icon" type="image/png" sizes="32x32" href="img/favicon-32.png">
 <link rel="apple-touch-icon" href="img/apple-touch-icon.png">
 <link rel="manifest" href="manifest.webmanifest">
+<script>try{var t=localStorage.getItem('fb_theme')||'auto';var d=t==='dark'||(t==='auto'&&matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.dataset.theme=d?'dark':'light';}catch(e){}</script>
 <meta name="description" content="Семейный бюджет — учёт расходов и доходов для всей семьи">
 <title>Семейный бюджет</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -101,6 +102,7 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       <div class="balances-hero-meta">
         <div><span>Внесено всего</span><b id="sharedTopups">—</b></div>
         <div><span>Потрачено всего</span><b id="sharedExpenses">—</b></div>
+        <div id="sharedSavedBox" hidden><span>В копилках</span><b id="sharedSaved">—</b></div>
       </div>
     </div>
 
@@ -127,13 +129,29 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       </div>
     </div>
 
+    <div class="card forecast" id="forecast" hidden></div>
+
+    <div class="section" id="paymentsSection" hidden>
+      <div class="section-title"><h2>Платежи этого месяца</h2><button type="button" class="text-button" id="paymentsEdit">Все</button></div>
+      <div id="paymentsList" class="card payments"></div>
+    </div>
+
+    <div class="section" id="goalsSection">
+      <div class="section-title"><h2>Цели</h2><button type="button" class="text-button" id="goalAdd">+ Новая</button></div>
+      <div id="goalsList" class="goals"></div>
+    </div>
+
     <div class="section" id="limitsSection">
       <div class="section-title"><h2>Лимиты</h2><button type="button" class="text-button" id="limitsEdit">Настроить</button></div>
       <div id="limitsList" class="limits card"></div>
     </div>
 
     <div class="section">
-      <div class="section-title"><h2>Последние операции</h2></div>
+      <div class="section-title"><h2 id="recentTitle">Последние операции</h2><button type="button" class="icon-button" id="searchToggle" aria-label="Поиск по операциям"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button></div>
+      <div class="search-box" id="searchBox" hidden>
+        <input id="searchInput" type="search" placeholder="Поиск: кафе, магнум, 5000, Томирис" autocomplete="off" enterkeyhint="search" aria-label="Поиск по всем операциям">
+        <button type="button" id="searchClose" aria-label="Закрыть поиск">×</button>
+      </div>
       <div id="recent" class="history"><div class="loading-placeholder">Загрузка…</div></div>
     </div>
   </section>
@@ -235,6 +253,7 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       <div class="kind-toggle" id="kindToggle">
         <button data-kind="expense" class="selected"><i>↘</i> Расход</button>
         <button data-kind="topup"><i>↗</i> Пополнение</button>
+        <button data-kind="transfer" id="kindTransfer"><i>⇄</i> Перевод</button>
       </div>
 
       <div class="amount-block">
@@ -250,10 +269,23 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
         <button data-clear class="clear">C</button>
       </div>
 
-      <div class="field-label">Категория</div>
-      <div class="cat-grid" id="catGrid"></div>
-      <button type="button" class="custom-cat-btn" id="customCatBtn">+ Своя категория</button>
-      <div class="limit-hint" id="limitHint" aria-live="polite" hidden></div>
+      <div class="entry-fields" id="entryFields">
+        <div class="field-label">Категория</div>
+        <div class="cat-grid" id="catGrid"></div>
+        <button type="button" class="custom-cat-btn" id="customCatBtn">+ Своя категория</button>
+        <div class="limit-hint" id="limitHint" aria-live="polite" hidden></div>
+      </div>
+
+      <div class="entry-fields" id="transferFields" hidden>
+        <div class="field-label">Кто кому передал</div>
+        <div class="group-toggle stacked" id="transferDir"></div>
+        <p class="field-help">Общий остаток не меняется — деньги переходят из личного остатка одного в личный остаток другого.</p>
+      </div>
+
+      <div class="entry-fields" id="payerRow" hidden>
+        <div class="field-label">Кто платил</div>
+        <div class="group-toggle" id="payerToggle"></div>
+      </div>
 
       <div class="field-label">Дата</div>
       <div class="date-row" id="dateRow">
@@ -266,6 +298,7 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       <input id="noteInput" class="note-input" maxlength="500" placeholder="Например, продукты на неделю" autocomplete="off">
 
       <button class="sheet-submit" id="submitBtn" type="button">Сохранить <span>↗</span></button>
+      <button class="sheet-delete" id="sheetDelete" type="button" hidden>Удалить запись</button>
     </div>
   </div>
 </div>
@@ -348,6 +381,28 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       </div>
 
       <div>
+        <h3 class="profile-section-title">Оформление</h3>
+        <div class="group-toggle three" id="themeToggle">
+          <button type="button" data-theme-choice="auto">Авто</button>
+          <button type="button" data-theme-choice="light">Светлая</button>
+          <button type="button" data-theme-choice="dark">Тёмная</button>
+        </div>
+      </div>
+
+      <div id="recurringBlock">
+        <h3 class="profile-section-title">Регулярные платежи</h3>
+        <p class="limits-help">Кредиты, коммуналка, подписки. В нужный день бот напомнит, а записать платёж можно одной кнопкой.</p>
+        <div id="recurringList" class="recurring-list"></div>
+        <button type="button" class="secondary-button" id="recurringAdd">+ Добавить платёж</button>
+      </div>
+
+      <div>
+        <h3 class="profile-section-title">Импорт выписки Kaspi</h3>
+        <p class="limits-help">Загрузите PDF-выписку Kaspi Gold — покупки попадут в бюджет с категориями. Файл разбирается прямо в браузере.</p>
+        <button type="button" class="secondary-button" id="importOpen">Загрузить выписку</button>
+      </div>
+
+      <div>
         <h3 class="profile-section-title">Лимиты</h3>
         <p class="limits-help">Трату можно записать и сверх лимита — он просто уйдёт в минус, а бот предупредит. Неделя начинается в понедельник.</p>
       </div>
@@ -375,8 +430,85 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       <div class="field-label">Предупреждать, когда осталось меньше</div>
       <div class="group-toggle" id="warnToggle"></div>
 
-      <button class="sheet-submit" id="limitsSave" type="button" disabled>Сохранить</button>
+      <button class="sheet-submit" id="limitsSave" type="button" disabled>Сохранить лимиты</button>
       <?php if (!$localDev): ?><a href="logout.php" class="profile-logout" id="profileLogout">Выйти из аккаунта</a><?php endif; ?>
+    </div>
+  </div>
+</div>
+
+<div class="cal-modal" id="goalModal" hidden>
+  <div class="cal-backdrop" data-goal-close></div>
+  <div class="cal-content small" role="dialog" aria-labelledby="goalModalTitle">
+    <div class="cal-header"><div id="goalModalTitle">Новая цель</div><button class="sheet-close" data-goal-close aria-label="Закрыть">×</button></div>
+    <div class="cat-form">
+      <label>Название<input id="goalTitle" maxlength="60" placeholder="Например, Отпуск" autocomplete="off"></label>
+      <label>Сколько нужно, ₸<input id="goalTarget" inputmode="numeric" placeholder="600 000" autocomplete="off"></label>
+      <label>К какой дате <span class="optional">необязательно</span><input id="goalDeadline" type="date"></label>
+      <button id="goalSave" class="sheet-submit" type="button">Сохранить</button>
+      <button id="goalCloseBtn" class="sheet-delete" type="button" hidden>Закрыть цель и вернуть деньги в бюджет</button>
+    </div>
+  </div>
+</div>
+
+<div class="cal-modal" id="moveModal" hidden>
+  <div class="cal-backdrop" data-move-close></div>
+  <div class="cal-content small" role="dialog" aria-labelledby="moveTitle">
+    <div class="cal-header"><div id="moveTitle">Копилка</div><button class="sheet-close" data-move-close aria-label="Закрыть">×</button></div>
+    <div class="cat-form">
+      <div class="group-toggle" id="moveDir">
+        <button type="button" data-dir="1" class="selected">Отложить</button>
+        <button type="button" data-dir="-1">Забрать</button>
+      </div>
+      <label>Сумма, ₸<input id="moveAmount" inputmode="numeric" placeholder="50 000" autocomplete="off"></label>
+      <p class="field-help" id="moveHelp"></p>
+      <button id="moveSave" class="sheet-submit" type="button">Готово</button>
+    </div>
+  </div>
+</div>
+
+<div class="cal-modal" id="recModal" hidden>
+  <div class="cal-backdrop" data-rec-close></div>
+  <div class="cal-content small" role="dialog" aria-labelledby="recTitle">
+    <div class="cal-header"><div id="recTitle">Регулярный платёж</div><button class="sheet-close" data-rec-close aria-label="Закрыть">×</button></div>
+    <div class="cat-form">
+      <label>Категория<select id="recCategory"></select></label>
+      <label>Сумма, ₸<input id="recAmount" inputmode="numeric" placeholder="45 000" autocomplete="off"></label>
+      <label>Комментарий <span class="optional">необязательно</span><input id="recNote" maxlength="200" placeholder="Например, Kaspi Red" autocomplete="off"></label>
+      <label>День месяца<input id="recDay" type="number" min="1" max="31" inputmode="numeric" placeholder="10"></label>
+      <div><div class="field-label">Кто платит</div><div class="group-toggle three" id="recPayer"></div></div>
+      <label class="switch-row"><span><b>Активен</b><small>Выключите, чтобы приостановить напоминания</small></span><input type="checkbox" id="recActive" role="switch" checked><i class="switch" aria-hidden="true"></i></label>
+      <button id="recSave" class="sheet-submit" type="button">Сохранить</button>
+      <button id="recDelete" class="sheet-delete" type="button" hidden>Удалить платёж</button>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="importSheet" hidden>
+  <div class="sheet-backdrop" data-import-close></div>
+  <div class="sheet-content" role="dialog" aria-labelledby="importTitle">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header">
+      <h2 id="importTitle">Импорт выписки</h2>
+      <button class="sheet-close" data-import-close aria-label="Закрыть">×</button>
+    </div>
+    <div class="sheet-body">
+      <div id="importStep1" class="import-step">
+        <div class="field-label">Чья это выписка</div>
+        <div class="group-toggle" id="importPayer"></div>
+        <label class="file-drop" id="fileDrop">
+          <input type="file" id="importFile" accept="application/pdf,.pdf,.txt">
+          <b>Выбрать PDF-выписку</b>
+          <span id="importFileName">Kaspi → Kaspi Gold → Выписка → Скачать PDF</span>
+        </label>
+        <details class="paste-box"><summary>или вставить текст выписки</summary><textarea id="importText" rows="6" placeholder="01.10.26  - 3 450,00 ₸  Покупка  MAGNUM"></textarea></details>
+        <button class="sheet-submit" id="importParse" type="button">Разобрать</button>
+      </div>
+      <div id="importStep2" class="import-step" hidden>
+        <div class="import-summary" id="importSummary"></div>
+        <div class="import-rows" id="importRows"></div>
+        <button class="sheet-submit" id="importConfirm" type="button">Импортировать</button>
+        <button class="secondary-button" id="importBack" type="button">← Выбрать другой файл</button>
+      </div>
     </div>
   </div>
 </div>

@@ -30,10 +30,12 @@ function db(): PDO {
     $pdo->exec("CREATE TABLE IF NOT EXISTS limit_notices(limit_id INTEGER NOT NULL,period_key TEXT NOT NULL,level INTEGER NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(limit_id,period_key,level));");
     $pdo->exec("CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY,v TEXT NOT NULL);");
     migrate_sqlite($pdo);
+    features_schema($pdo);
     seed_local_demo($pdo);
   } else {
     $pdo = new PDO("mysql:host={$c['host']};dbname={$c['name']};charset={$c['charset']}", $c['user'], $c['password'], $opts);
     migrate_mysql($pdo);
+    features_schema($pdo);
   }
   return $pdo;
 }
@@ -92,6 +94,11 @@ function seed_local_demo(PDO $pdo): void {
 function telegram(string $method, array $payload, int $timeout = 10): array {
   global $config;
   if (empty($config['bot_token'])) throw new RuntimeException('Настройте токен бота в config.php');
+  // Test hook: FAMFIN_DRY_TELEGRAM=1 prints calls instead of reaching real chats
+  if (getenv('FAMFIN_DRY_TELEGRAM')) {
+    fwrite(STDERR, "[dry $method] " . json_encode($payload, JSON_UNESCAPED_UNICODE) . "\n");
+    return ['ok' => true, 'result' => ['message_id' => random_int(1000, 9999)]];
+  }
   $ch = curl_init('https://api.telegram.org/bot' . $config['bot_token'] . '/' . $method);
   curl_setopt_array($ch, [
     CURLOPT_POST => true,
@@ -269,12 +276,21 @@ function balances_until(string $untilExclusive): array {
     else { $per[$id]['topups'] += $v; $totalTop += $v; }
     $per[$id]['count'] += (int)$r['n'];
   }
-  foreach ($per as &$p) $p['balance'] = $p['topups'] - $p['expenses'];
+  // Transfers move money between members; goal savings leave the available balance
+  $transfers = transfer_effects_until($untilExclusive);
+  $saved = goal_moves_until($untilExclusive);
+  $totalSaved = 0.0;
+  foreach ($per as &$p) {
+    $p['transfers'] = $transfers[$p['id']] ?? 0.0;
+    $p['saved'] = $saved[$p['id']] ?? 0.0;
+    $totalSaved += $p['saved'];
+    $p['balance'] = $p['topups'] - $p['expenses'] + $p['transfers'] - $p['saved'];
+  }
   unset($p);
   return [
     'currency' => $config['currency'],
     'until' => (new DateTimeImmutable($untilExclusive))->modify('-1 day')->format('Y-m-d'),
-    'shared' => ['topups'=>$totalTop, 'expenses'=>$totalExp, 'balance'=>$totalTop - $totalExp],
+    'shared' => ['topups'=>$totalTop, 'expenses'=>$totalExp, 'saved'=>$totalSaved, 'balance'=>$totalTop - $totalExp - $totalSaved],
     'members' => array_values($per),
   ];
 }
@@ -821,16 +837,38 @@ function handle_bot_command(int $chatId, int $userId, string $text, string $appU
     case '/limits':
       telegram('sendMessage', ['chat_id' => $chatId, 'text' => format_limits(limits_status($userId))]);
       break;
+    case '/backup':
+      // Only the backup recipient may pull a copy on demand
+      if ((string)$userId !== (string)($config['backup_chat_id'] ?? '')) {
+        telegram('sendMessage', ['chat_id' => $chatId, 'text' => 'Копии приходят только владельцу резервных копий.']);
+        break;
+      }
+      $b = make_backup();
+      send_backup((string)$chatId, $b);
+      break;
     case '/help':
     case '/add':
+      bot_send_help($chatId, $appUrl);
+      break;
     default:
+      if ($text !== '' && $text[0] !== '/' && bot_handle_text($chatId, $userId, $text)) break;
       $markup = ['inline_keyboard' => [[['text' => 'Открыть бюджет', 'web_app' => ['url' => $appUrl]]]]];
       telegram('sendMessage', [
         'chat_id' => $chatId,
-        'text' => "Команды:\n/start — открыть приложение\n/login — получить код для входа на сайт\n/balance — текущие остатки\n/week — сводка за неделю\n/month — сводка за месяц\n/limits — лимиты по категориям\n/help — эта справка\n\nРасходы и пополнения — в Mini App.",
+        'text' => "Не понял сообщение 🙂\n\nЧтобы записать трату, напишите сумму и на что: «кафе 5000», «12 300 продукты магнум», «вчера такси 1800». Пополнение — с плюсом: «+350 000 зарплата».\n\n/help — все команды",
         'reply_markup' => $markup,
       ]);
       break;
   }
 }
+
+function bot_send_help(int $chatId, string $appUrl): void {
+  global $config;
+  $text = "Как записывать:\n• «кафе 5000» — расход, категория определится сама\n• «12 300 продукты магнум» — с комментарием\n• «вчера такси 1800» или «28.09 аптека 4500» — с датой\n• «+350 000 зарплата» — пополнение\nПосле записи можно сменить категорию или отменить кнопкой.\n\nКоманды:\n/balance — текущие остатки\n/week — сводка за неделю\n/month — сводка за месяц\n/limits — лимиты\n/login — код для входа на сайт\n/start — открыть приложение";
+  if (!empty($config['backup_chat_id'])) $text .= "\n/backup — резервная копия (только владельцу)";
+  telegram('sendMessage', ['chat_id' => $chatId, 'text' => $text, 'reply_markup' => ['inline_keyboard' => [[['text' => 'Открыть бюджет', 'web_app' => ['url' => $appUrl]]]]]]);
+}
+
+require __DIR__ . '/features.php';
+require __DIR__ . '/bot.php';
 

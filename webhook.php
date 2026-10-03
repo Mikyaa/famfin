@@ -8,6 +8,11 @@ if (empty($config['webhook_secret']) || !hash_equals($config['webhook_secret'], 
 }
 
 $u = json_decode(file_get_contents('php://input'), true) ?: [];
+if (isset($u['callback_query'])) {
+  try { bot_handle_callback($u['callback_query']); } catch (Throwable $e) { error_log((string)$e); }
+  echo 'ok';
+  exit;
+}
 $m = $u['message'] ?? null;
 if (!$m) { echo 'ok'; exit; }
 
@@ -22,6 +27,7 @@ save_member(['id'=>$id,'name'=>user_label($id, $name)]);
 $text = trim((string)($m['text'] ?? ''));
 $url = rtrim($config['app_url'], '/');
 
-handle_bot_command($chat, $id, $text, $url);
+try { handle_bot_command($chat, $id, $text, $url); }
+catch (RuntimeException $e) { telegram('sendMessage', ['chat_id' => $chat, 'text' => '⚠️ ' . $e->getMessage()]); }
 
 echo 'ok';

@@ -2,6 +2,11 @@
 declare(strict_types=1);
 require __DIR__.'/lib.php';
 
+function body(): array {
+  $d = json_decode(file_get_contents('php://input'), true);
+  return is_array($d) ? $d : [];
+}
+
 try {
   $member = auth_member();
   save_member($member);
@@ -16,7 +21,7 @@ try {
     $month = range_summary($mFrom, $mUntil);
     [$wFrom, $wUntil] = normalize_period(null, null, 'week');
     $week = range_summary($wFrom, $wUntil);
-    $recent = db()->query("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id ORDER BY t.occurred_on DESC,t.id DESC LIMIT 10")->fetchAll();
+    $recent = db()->query("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,t.telegram_id,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id ORDER BY t.occurred_on DESC,t.id DESC LIMIT 10")->fetchAll();
     foreach ($recent as &$r) $r['group'] = category_group_of($r['category'], $r['cg'] ?: null);
     unset($r);
     json_out([
@@ -25,6 +30,11 @@ try {
       'month' => $month,
       'week' => $week,
       'recent' => $recent,
+      'transfers' => list_transfers(5),
+      'goals' => goals_list(),
+      'forecast' => month_forecast(),
+      'recurring' => recurring_list(),
+      'members' => array_map(fn($id, $name) => ['id' => $id, 'name' => $name], array_keys(allowed_members_map()), allowed_members_map()),
       'limits' => limits_status((int)$member['id']),
       'category_groups' => $config['category_groups'] ?? ['fixed'=>[],'variable'=>[]],
     ]);
@@ -54,7 +64,7 @@ try {
     $page = max(1, (int)($_GET['page'] ?? 1));
     $limit = min(200, max(10, (int)($_GET['limit'] ?? 50)));
     $offset = ($page - 1) * $limit;
-    $q = db()->prepare("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id WHERE t.occurred_on>=? AND t.occurred_on<? ORDER BY t.occurred_on DESC,t.id DESC LIMIT $limit OFFSET $offset");
+    $q = db()->prepare("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,t.telegram_id,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id WHERE t.occurred_on>=? AND t.occurred_on<? ORDER BY t.occurred_on DESC,t.id DESC LIMIT $limit OFFSET $offset");
     $q->execute([$from, $until]);
     $rows = $q->fetchAll();
     foreach ($rows as &$r) $r['group'] = category_group_of($r['category'], $r['cg'] ?: null);
@@ -162,49 +172,73 @@ try {
   }
 
   if ($method === 'POST' && $action === 'delete') {
-    $d = json_decode(file_get_contents('php://input'), true) ?: [];
+    $d = body();
     $id = filter_var($d['id'] ?? null, FILTER_VALIDATE_INT);
-    if (!$id) {
-      json_out(['error'=>'Invalid ID'], 422);
-    }
-    // Any family member can delete any transaction
-    $allowed = $config['allowed_users'];
-    $placeholders = implode(',', array_fill(0, count($allowed), '?'));
-    $q = db()->prepare("DELETE FROM transactions WHERE id=? AND telegram_id IN ($placeholders)");
-    $q->execute(array_merge([$id], $allowed));
-    if ($q->rowCount() === 0) {
-      json_out(['error'=>'Запись не найдена'], 404);
-    }
-    set_setting('balance_widget_dirty', '1');
+    if (!$id) json_out(['error'=>'Invalid ID'], 422);
+    // Any family member can delete any record
+    $ok = ($d['type'] ?? '') === 'transfer' ? delete_transfer($id) : delete_transaction($id);
+    if (!$ok) json_out(['error'=>'Запись не найдена'], 404);
     json_out(['ok'=>true]);
   }
 
+  if ($method === 'POST' && $action === 'update') {
+    $d = body();
+    $id = filter_var($d['id'] ?? null, FILTER_VALIDATE_INT);
+    if (!$id) json_out(['error'=>'Invalid ID'], 422);
+    $e = update_transaction($id, $d);
+    $limits = $e['kind'] === 'expense' ? check_limit_alerts($e['category'], $e['date'], ['id' => $e['payer_id'], 'name' => user_label($e['payer_id'])], (float)$e['amount']) : [];
+    json_out(['ok'=>true, 'limits'=>$limits]);
+  }
+
+  if ($method === 'POST' && $action === 'transfer') {
+    $d = body();
+    $id = add_transfer((int)($d['from_id'] ?? $member['id']), (int)($d['to_id'] ?? 0), $d['amount'] ?? null, (string)($d['note'] ?? ''), (string)($d['date'] ?? date('Y-m-d')), (int)$member['id']);
+    json_out(['ok'=>true, 'id'=>$id]);
+  }
+
+  if ($method === 'POST' && $action === 'goal_save') { json_out(['ok'=>true, 'id'=>goal_save(body(), $member), 'goals'=>goals_list()]); }
+  if ($method === 'POST' && $action === 'goal_move') { $d = body(); goal_move((int)($d['id'] ?? 0), $d['amount'] ?? null, $member); json_out(['ok'=>true, 'goals'=>goals_list()]); }
+  if ($method === 'POST' && $action === 'goal_close') { goal_close((int)(body()['id'] ?? 0)); json_out(['ok'=>true, 'goals'=>goals_list()]); }
+
+  if ($method === 'GET' && $action === 'recurring') { json_out(['items'=>recurring_list(), 'categories'=>known_categories()]); }
+  if ($method === 'POST' && $action === 'recurring_save') { recurring_save(body(), $member); json_out(['ok'=>true, 'items'=>recurring_list()]); }
+  if ($method === 'POST' && $action === 'recurring_delete') { recurring_delete((int)(body()['id'] ?? 0)); json_out(['ok'=>true, 'items'=>recurring_list()]); }
+  if ($method === 'POST' && $action === 'recurring_skip') { recurring_skip((int)(body()['id'] ?? 0)); json_out(['ok'=>true, 'items'=>recurring_list()]); }
+  if ($method === 'POST' && $action === 'recurring_pay') {
+    $d = body();
+    $r = recurring_pay((int)($d['id'] ?? 0), $member, $d['amount'] ?? null);
+    json_out(['ok'=>true, 'limits'=>$r['limits'], 'items'=>recurring_list()]);
+  }
+
+  if ($method === 'GET' && $action === 'search') {
+    json_out(['items' => search_operations((string)($_GET['q'] ?? ''))]);
+  }
+
+  if ($method === 'POST' && $action === 'import_preview') {
+    $d = body();
+    $text = (string)($d['text'] ?? '');
+    if (strlen($text) > 3000000) json_out(['error'=>'Слишком большой файл'], 413);
+    $payer = (int)($d['payer_id'] ?? $member['id']);
+    if (!is_member_id($payer)) json_out(['error'=>'Неверный участник'], 422);
+    json_out(['rows' => parse_bank_statement($text, $payer), 'categories' => known_categories()]);
+  }
+
+  if ($method === 'POST' && $action === 'import') {
+    $d = body();
+    if (!is_array($d['rows'] ?? null)) json_out(['error'=>'Нет данных'], 422);
+    $n = import_rows($d['rows'], (int)($d['payer_id'] ?? $member['id']));
+    json_out(['ok'=>true, 'imported'=>$n]);
+  }
+
   if ($method === 'POST' && $action === 'main') {
-    $d = json_decode(file_get_contents('php://input'), true) ?: [];
-    $kind = $d['kind'] ?? '';
-    $amount = filter_var($d['amount'] ?? null, FILTER_VALIDATE_FLOAT);
-    $category = trim((string)($d['category'] ?? ''));
-    $customCategory = trim((string)($d['custom_category'] ?? ''));
-    $note = trim((string)($d['note'] ?? ''));
-    $date = (string)($d['date'] ?? date('Y-m-d'));
-    $groupInput = $d['category_group'] ?? null;
-    if ($customCategory !== '') $category = $customCategory;
-    if (!in_array($kind, ['expense','topup'], true) || !$amount || $amount <= 0 || $amount > 100000000
-        || $category === '' || mb_strlen($category) > 80 || mb_strlen($note) > 500
-        || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date) || $date > date('Y-m-d')) {
-      json_out(['error'=>'Проверьте сумму, дату и категорию'], 422);
-    }
-    $group = in_array($groupInput, ['fixed','variable'], true) ? $groupInput : category_group_of($category);
-    $q = db()->prepare('INSERT INTO transactions(telegram_id,kind,amount,category,category_group,note,occurred_on) VALUES(?,?,?,?,?,?,?)');
-    $q->execute([$member['id'], $kind, $amount, $category, $group, $note, $date]);
-    $id = db()->lastInsertId();
-    set_setting('balance_widget_dirty', '1');
+    $e = validate_entry(body());
+    $id = insert_transaction((int)$member['id'], $e);
     // Limits never block a record; they only report where the family stands
     $limits = [];
-    if ($kind === 'expense') {
-      try { $limits = check_limit_alerts($category, $date, $member, (float)$amount); } catch (Throwable $e) { error_log((string)$e); }
+    if ($e['kind'] === 'expense') {
+      try { $limits = check_limit_alerts($e['category'], $e['date'], $member, (float)$e['amount']); } catch (Throwable $ex) { error_log((string)$ex); }
     }
-    json_out(['ok'=>true, 'id'=>$id, 'category_group'=>$group, 'limits'=>$limits]);
+    json_out(['ok'=>true, 'id'=>$id, 'category_group'=>$e['group'], 'limits'=>$limits]);
   }
 
   json_out(['error'=>'Not found'], 404);

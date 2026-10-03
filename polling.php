@@ -19,6 +19,7 @@ telegram('setMyCommands', ['commands' => [
   ['command'=>'week','description'=>'Сводка за неделю'],
   ['command'=>'month','description'=>'Сводка за месяц'],
   ['command'=>'limits','description'=>'Лимиты по категориям'],
+  ['command'=>'backup','description'=>'Резервная копия (владельцу)'],
   ['command'=>'help','description'=>'Помощь'],
 ]]);
 
@@ -32,10 +33,11 @@ $appUrl = rtrim($config['app_url'] ?? '', '/');
 $offset = 0;
 while (true) {
   try {
-    $updates = telegram('getUpdates', ['offset'=>$offset,'timeout'=>25,'allowed_updates'=>['message']], 35);
+    $updates = telegram('getUpdates', ['offset'=>$offset,'timeout'=>25,'allowed_updates'=>['message','callback_query']], 35);
     if (!($updates['ok'] ?? false)) { fwrite(STDERR, "Telegram polling error; retrying in 3 seconds.\n"); sleep(3); continue; }
     foreach ($updates['result'] ?? [] as $update) {
       $offset = max($offset, (int)$update['update_id'] + 1);
+      if (isset($update['callback_query'])) { bot_handle_callback($update['callback_query']); continue; }
       $message = $update['message'] ?? null;
       if (!$message) continue;
       $from = $message['from'] ?? [];

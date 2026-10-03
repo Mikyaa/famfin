@@ -334,16 +334,6 @@ function balance_widget_caption(array $d): string {
   return implode("\n", $lines);
 }
 
-function telegram_multipart(string $method, array $fields): array {
-  global $config;
-  $ch = curl_init('https://api.telegram.org/bot' . $config['bot_token'] . '/' . $method);
-  curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $fields, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 30]);
-  $raw = curl_exec($ch);
-  if ($raw === false) { $err = curl_error($ch); curl_close($ch); throw new RuntimeException($err); }
-  curl_close($ch);
-  return json_decode($raw, true) ?: [];
-}
-
 // Creates and pins the widget the first time, then edits that same message
 function update_balance_widget(string $chatId): string {
   global $config;

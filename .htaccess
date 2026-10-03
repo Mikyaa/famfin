@@ -4,7 +4,7 @@ Options -Indexes
   Require all denied
 </FilesMatch>
 
-<FilesMatch "^(config(\.example)?\.php|lib\.php|router\.php|polling\.php|weekly_report\.php|report_image\.php|widget_update\.php|\.gitignore|\.env.*)$">
+<FilesMatch "^(config(\.example)?\.php|lib\.php|router\.php|polling\.php|weekly_report\.php|report_image\.php|widget_update\.php|features\.php|bot\.php|backup\.php|daily\.php|\.gitignore|\.env.*)$">
   Require all denied
 </FilesMatch>
 
