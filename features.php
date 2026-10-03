@@ -105,18 +105,21 @@ function delete_transaction(int $id): bool {
 /* ========== CATEGORY GUESSING ========== */
 // Keyword stems → default categories; used by the bot and the statement import
 const CATEGORY_KEYWORDS = [
-  'Продукты' => ['diona', 'диона', 'аяна', 'береке', 'bereke', 'балмарт', 'mix market', 'кажетмаркет', 'small ', 'продукт', 'магнум', 'magnum', 'small', 'смолл', 'галмарт', 'galmart', 'анвар', 'супермаркет', 'гипермаркет', 'овощ', 'фрукт', 'хлеб', 'молок', 'мясо', 'рынок', 'базар', 'arbuz', 'арбуз', 'airba fresh', 'grocery', 'метро кэш', 'metro cash', 'toimart', 'дикси', 'ашан', 'еда домой', 'продукты'],
-  'Кафе и рестораны' => ['qazan plov', 'плов', 'taptatti', "i'm restaurants", 'restaurant', 'кафе', 'ресторан', 'кофе', 'coffee', 'кофейн', 'обед', 'ужин', 'завтрак', 'бар ', 'пицц', 'pizza', 'суши', 'sushi', 'роллы', 'бургер', 'burger', 'kfc', 'mcdonald', 'макдон', 'шаурм', 'донер', 'wolt', 'glovo', 'chocofood', 'яндекс еда', 'yandex eda', 'starbucks', 'столов', 'фастфуд', 'доставка еды', 'чайхан', 'кальян'],
+  'Продукты' => ['korzinka', 'корзинка', 'фермаг', 'ovochshnoy', 'овощн', 'diona', 'диона', 'аяна', 'береке', 'bereke', 'балмарт', 'mix market', 'кажетмаркет', 'small ', 'продукт', 'магнум', 'magnum', 'small', 'смолл', 'галмарт', 'galmart', 'анвар', 'супермаркет', 'гипермаркет', 'овощ', 'фрукт', 'хлеб', 'молок', 'мясо', 'рынок', 'базар', 'arbuz', 'арбуз', 'airba fresh', 'grocery', 'метро кэш', 'metro cash', 'toimart', 'дикси', 'ашан', 'еда домой', 'продукты'],
+  'Кафе и рестораны' => ['wedrink', 'etet', 'et-et', 'омега 75', 'popeyes', 'espressoday', '2 beans', 'qazplov', 'мята', 'тағам', 'canteen', 'servis pitaniya', 'асхана', 'qazan plov', 'плов', 'taptatti', "i'm restaurants", 'restaurant', 'кафе', 'ресторан', 'кофе', 'coffee', 'кофейн', 'обед', 'ужин', 'завтрак', 'бар ', 'пицц', 'pizza', 'суши', 'sushi', 'роллы', 'бургер', 'burger', 'kfc', 'mcdonald', 'макдон', 'шаурм', 'донер', 'wolt', 'glovo', 'chocofood', 'яндекс еда', 'yandex eda', 'starbucks', 'столов', 'фастфуд', 'доставка еды', 'чайхан', 'кальян'],
   'Транспорт' => ['avtobys', 'lrt ', 'lrt', 'такси', 'taxi', 'яндекс го', 'yandex.go', 'yandex go', 'uber', 'indriver', 'индрайв', 'бензин', 'азс', 'заправк', 'топливо', 'helios', 'гелиос', 'sinooil', 'qazaq oil', 'парковк', 'parking', 'автобус', 'метро', 'onay', 'онай', 'проезд', 'автомойк', 'шиномонтаж', 'сто ', 'техосмотр'],
-  'Дом' => ['ерц', 'коммунал', 'квартплат', 'аренд', 'электроэнерг', 'свет за', 'газ ', 'вода', 'отоплен', 'ремонт', 'мебел', 'посуд', 'бытов', 'хозтовар', 'leroy', 'леруа', 'икеа', 'ikea', 'химчистк', 'клининг', 'кск', 'осмд', 'алсеко', 'alseco'],
-  'Здоровье' => ['аптек', 'apteka', 'pharm', 'врач', 'клиник', 'больниц', 'анализ', 'invitro', 'инвитро', 'олимп', 'стоматолог', 'зубн', 'лекарств', 'витамин', 'медицин', 'массаж', 'окулист'],
+  'Дом' => ['ерц', 'рэк', 'аквафор', 'аварийная служба', 'жастар-3', 'kuat stroy', 'строймаркет', 'оси ', 'коммунал', 'квартплат', 'аренд', 'электроэнерг', 'свет за', 'газ ', 'вода', 'отоплен', 'ремонт', 'мебел', 'посуд', 'бытов', 'хозтовар', 'leroy', 'леруа', 'икеа', 'ikea', 'химчистк', 'клининг', 'кск', 'осмд', 'алсеко', 'alseco'],
+  'Здоровье' => ['фарма', 'альфа-мед', 'fitness', 'фитнес', 'аптек', 'apteka', 'pharm', 'врач', 'клиник', 'больниц', 'анализ', 'invitro', 'инвитро', 'олимп', 'стоматолог', 'зубн', 'лекарств', 'витамин', 'медицин', 'массаж', 'окулист'],
   'Дети' => ['детск', 'ребен', 'ребён', 'сад ', 'садик', 'школ', 'игрушк', 'памперс', 'подгузн', 'кружок', 'секци', 'репетитор', 'няня', 'детский мир'],
   'Подписки' => ['подписк', 'netflix', 'spotify', 'youtube', 'яндекс плюс', 'yandex plus', 'icloud', 'apple.com', 'google one', 'chatgpt', 'openai', 'claude', 'интернет', 'связь', 'мобильн', 'телефон', 'beeline', 'билайн', 'kcell', 'activ', 'tele2', 'altel', 'kazakhtelecom', 'казахтелеком', 'ivi', 'okko', 'кинопоиск'],
   'Кредиты' => ['кредит', 'рассрочк', 'ипотек', 'kaspi red', 'каспи ред', 'red ', 'займ', 'долг', 'погашен'],
-  'Покупки' => ['fix price', 'fix-price', 'fixprice', 'kaspi magazin', 'зоомаркет', 'зоо', 'lovely store', 'одежд', 'обув', 'wildberries', 'вайлдберриз', 'ozon', 'озон', 'kaspi магазин', 'kaspi.kz магазин', 'техник', 'электроник', 'sulpak', 'сулпак', 'technodom', 'технодом', 'mechta', 'мечта', 'zara', 'lc waikiki', 'косметик', 'парфюм', 'подарок', 'подарк', 'aliexpress', 'temu', 'покупк', 'магазин'],
+  'Покупки' => ['defacto', 'kari', 'meloman', 'marwin', 'flowers', 'цвет', 'букет', 'хризантема', 'best prays', 'best price', 'fix price', 'fix-price', 'fixprice', 'kaspi magazin', 'зоомаркет', 'зоо', 'lovely store', 'одежд', 'обув', 'wildberries', 'вайлдберриз', 'ozon', 'озон', 'kaspi магазин', 'kaspi.kz магазин', 'техник', 'электроник', 'sulpak', 'сулпак', 'technodom', 'технодом', 'mechta', 'мечта', 'zara', 'lc waikiki', 'косметик', 'парфюм', 'подарок', 'подарк', 'aliexpress', 'temu', 'покупк', 'магазин'],
   'Путешествия' => ['билет', 'авиа', 'air astana', 'эйр астана', 'fly arystan', 'scat', 'отель', 'hotel', 'гостиниц', 'booking', 'airbnb', 'поезд', 'жд ', 'тур ', 'путешеств', 'виза', 'отпуск'],
-  'Развлечения' => ['lordgame', 'компьютерный клуб', 'кино', 'cinema', 'kinopark', 'кинопарк', 'chaplin', 'концерт', 'театр', 'боулинг', 'бильярд', 'квест', 'игр', 'steam', 'playstation', 'развлеч', 'парк ', 'аттракцион', 'музей', 'клуб'],
+  'Развлечения' => ['usetime', 'антикафе', 'anticafe', 'harry potter', 'lordgame', 'компьютерный клуб', 'кино', 'cinema', 'kinopark', 'кинопарк', 'chaplin', 'концерт', 'театр', 'боулинг', 'бильярд', 'квест', 'игр', 'steam', 'playstation', 'развлеч', 'парк ', 'аттракцион', 'музей', 'клуб'],
 ];
+
+// Food words in Latin script (merchant names like "QAZAN PLOV", "Yumi_Yumi") mean cafés and restaurants
+const LATIN_FOOD = '/(?<![a-z])(plov|burger|burgers|pizza|pizzeria|sushi|rolls?|doner|donar|kebab|shawarma|shaurma|lagman|manty|samsa|coffee|espresso|latte|cafe|caf[eé]|bistro|bar|pub|lounge|canteen|grill|bbq|steak|chicken|wings|noodles?|ramen|wok|tacos?|bakery|cake|donuts?|dessert|ice ?cream|bubble ?tea|boba|tea|kitchen|food|foods|dining|restaurant|restoran|chef|yumi|tagam|asxana|kfc|popeyes|hardee|dodo|beans)(?![a-z])/u';
 
 // Broad hints used only when no specific keyword matched
 const CATEGORY_FALLBACK = ['маркет' => 'Продукты', 'market' => 'Продукты', 'mart' => 'Продукты', 'гастроном' => 'Продукты', 'store' => 'Покупки', 'shop' => 'Покупки', 'бутик' => 'Покупки', 'coffee' => 'Кафе и рестораны', 'food' => 'Кафе и рестораны'];
@@ -124,6 +127,7 @@ const CATEGORY_FALLBACK = ['маркет' => 'Продукты', 'market' => 'П
 function categorize_text(string $text): ?string {
   $t = ' ' . mb_strtolower(trim($text)) . ' ';
   if (trim($t) === '') return null;
+  if (trim($t) === 'cu') return 'Продукты';
   // Exact or prefix match with a category the family already uses (incl. custom ones)
   foreach (known_categories() as $c) {
     $name = mb_strtolower($c['category']);
@@ -132,6 +136,7 @@ function categorize_text(string $text): ?string {
   foreach (CATEGORY_KEYWORDS as $category => $words) {
     foreach ($words as $w) if (str_contains($t, $w)) return $category;
   }
+  if (preg_match(LATIN_FOOD, str_replace(['_', '*', '.', '"'], ' ', $t))) return 'Кафе и рестораны';
   foreach (CATEGORY_FALLBACK as $w => $category) if (str_contains($t, $w)) return $category;
   return null;
 }
