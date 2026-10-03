@@ -15,6 +15,7 @@ function features_schema(PDO $pdo): void {
     if (!has_column($pdo, 'transactions', 'recurring_id')) $pdo->exec("ALTER TABLE transactions ADD COLUMN recurring_id INTEGER NULL;");
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_transfers_date ON transfers(occurred_on);");
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_goal_moves_goal ON goal_moves(goal_id);");
+    statement_jobs_schema($pdo);
     return;
   }
   $cs = 'DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci';
@@ -24,6 +25,7 @@ function features_schema(PDO $pdo): void {
   $pdo->exec("CREATE TABLE IF NOT EXISTS recurring(id BIGINT AUTO_INCREMENT PRIMARY KEY,kind VARCHAR(8) NOT NULL DEFAULT 'expense',amount DECIMAL(14,2) NOT NULL,category VARCHAR(80) NOT NULL,category_group VARCHAR(16) NULL,note VARCHAR(500) NOT NULL DEFAULT '',day TINYINT NOT NULL,payer_id BIGINT NOT NULL DEFAULT 0,active TINYINT NOT NULL DEFAULT 1,done_period CHAR(7) NULL,skipped_period CHAR(7) NULL,reminded_period CHAR(7) NULL,created_by BIGINT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) $cs");
   $pdo->exec("CREATE TABLE IF NOT EXISTS bot_actions(id BIGINT AUTO_INCREMENT PRIMARY KEY,telegram_id BIGINT NOT NULL,payload TEXT NOT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) $cs");
   if (!has_column($pdo, 'transactions', 'recurring_id')) $pdo->exec("ALTER TABLE transactions ADD COLUMN recurring_id BIGINT NULL");
+  statement_jobs_schema($pdo);
 }
 
 function mark_balance_changed(): void { set_setting('balance_widget_dirty', '1'); }
@@ -394,24 +396,32 @@ function parse_bank_statement(string $text, int $payerId): array {
     $isPurchase = str_starts_with($type, 'покупк') || str_starts_with($type, 'плат') || str_starts_with($type, 'оплат');
     $category = $kind === 'topup' ? 'Пополнение' : (categorize_text($details) ?? ($isPurchase ? 'Другое' : 'Другое'));
     $rows[] = ['date' => $date, 'kind' => $kind, 'amount' => $amount, 'type' => $x[6], 'note' => mb_substr($details, 0, 200),
-      'category' => $category, 'group' => category_group_of($category), 'include' => $isPurchase && $kind === 'expense', 'duplicate' => false];
+      'category' => $category, 'group' => category_group_of($category), 'purchase' => $isPurchase && $kind === 'expense',
+      'include' => $isPurchase && $kind === 'expense', 'duplicate' => false];
   }
+  return mark_statement_duplicates($rows, $payerId);
+}
+
+// Operations that already exist for this member (same date, kind and amount) are duplicates
+function mark_statement_duplicates(array $rows, int $payerId): array {
   if (!$rows) return [];
-  // Mark operations that already exist (same date, kind and amount) as duplicates
   $dates = array_column($rows, 'date');
   $q = db()->prepare('SELECT occurred_on,kind,amount FROM transactions WHERE occurred_on>=? AND occurred_on<=? AND telegram_id=?');
   $q->execute([min($dates), max($dates), $payerId]);
   $existing = [];
   foreach ($q as $r) { $k = $r['occurred_on'] . '|' . $r['kind'] . '|' . number_format((float)$r['amount'], 2, '.', ''); $existing[$k] = ($existing[$k] ?? 0) + 1; }
   foreach ($rows as &$row) {
-    $k = $row['date'] . '|' . $row['kind'] . '|' . number_format($row['amount'], 2, '.', '');
+    $k = $row['date'] . '|' . $row['kind'] . '|' . number_format((float)$row['amount'], 2, '.', '');
+    $row['duplicate'] = false;
+    $row['include'] = !empty($row['purchase']);
     if (($existing[$k] ?? 0) > 0) { $existing[$k]--; $row['duplicate'] = true; $row['include'] = false; }
   }
   unset($row);
   return $rows;
 }
 
-function import_rows(array $rows, int $payerId): int {
+// Returns the ids of the created operations (so a bot import can be undone)
+function import_rows(array $rows, int $payerId): array {
   if (!is_member_id($payerId)) throw new RuntimeException('Неверный участник');
   if (count($rows) > 2000) throw new RuntimeException('Слишком много строк за раз');
   $entries = [];
@@ -421,9 +431,10 @@ function import_rows(array $rows, int $payerId): int {
   }
   $pdo = db();
   $pdo->beginTransaction();
-  try { foreach ($entries as $e) insert_transaction($payerId, $e); $pdo->commit(); }
+  $ids = [];
+  try { foreach ($entries as $e) $ids[] = insert_transaction($payerId, $e); $pdo->commit(); }
   catch (Throwable $e) { $pdo->rollBack(); throw $e; }
-  return count($entries);
+  return $ids;
 }
 
 /* ========== TELEGRAM UPLOADS ========== */
@@ -496,4 +507,117 @@ function monthly_report_text(?string $anyDayOfMonth = null): string {
   }
   if ($over) { $lines[] = ''; $lines[] = 'Превышенные лимиты:'; array_push($lines, ...$over); }
   return implode("\n", $lines);
+}
+
+/* ========== STATEMENTS SENT TO THE BOT ========== */
+// A PDF statement sent to the bot becomes a job; statement_worker.php (cron, CLI) downloads
+// it, extracts text with Ghostscript and replies with a summary and import buttons.
+
+function statement_jobs_schema(PDO $pdo): void {
+  if (is_sqlite()) {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS statement_jobs(id INTEGER PRIMARY KEY AUTOINCREMENT,telegram_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,file_id TEXT NOT NULL,file_name TEXT NOT NULL DEFAULT '',message_id INTEGER NULL,status TEXT NOT NULL DEFAULT 'new',error TEXT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);");
+  } else {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS statement_jobs(id BIGINT AUTO_INCREMENT PRIMARY KEY,telegram_id BIGINT NOT NULL,chat_id BIGINT NOT NULL,file_id VARCHAR(255) NOT NULL,file_name VARCHAR(255) NOT NULL DEFAULT '',message_id BIGINT NULL,status VARCHAR(8) NOT NULL DEFAULT 'new',error VARCHAR(500) NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+  }
+}
+
+// Text of a PDF via Ghostscript's txtwrite device (keeps table columns on one line)
+function pdf_to_text(string $file): string {
+  global $config;
+  $gs = $config['gs_path'] ?? '/usr/bin/gs';
+  if (!is_executable($gs)) throw new RuntimeException('На сервере не найден Ghostscript для чтения PDF');
+  $proc = proc_open([$gs, '-q', '-dNOPAUSE', '-dBATCH', '-dSAFER', '-sDEVICE=txtwrite', '-sOutputFile=-', $file], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+  if (!is_resource($proc)) throw new RuntimeException('Не удалось запустить чтение PDF');
+  $text = stream_get_contents($pipes[1]);
+  stream_get_contents($pipes[2]); // gs 10.02 prints a harmless "finalizing subclassing device" warning
+  fclose($pipes[1]); fclose($pipes[2]);
+  proc_close($proc);
+  return (string)$text;
+}
+
+function telegram_download(string $fileId, string $dest): void {
+  global $config;
+  $f = telegram('getFile', ['file_id' => $fileId]);
+  $path = $f['result']['file_path'] ?? null;
+  if (!$path) throw new RuntimeException('Telegram не отдал файл: ' . ($f['description'] ?? 'неизвестная ошибка'));
+  $ch = curl_init('https://api.telegram.org/file/bot' . $config['bot_token'] . '/' . $path);
+  $fh = fopen($dest, 'wb');
+  curl_setopt_array($ch, [CURLOPT_FILE => $fh, CURLOPT_TIMEOUT => 60, CURLOPT_FAILONERROR => true]);
+  $ok = curl_exec($ch);
+  $err = curl_error($ch);
+  curl_close($ch);
+  fclose($fh);
+  if (!$ok) throw new RuntimeException('Не удалось скачать файл: ' . $err);
+}
+
+function statement_summary(array $rows, int $payerId, string $fileName = ''): string {
+  $dates = array_column($rows, 'date');
+  $buy = array_filter($rows, fn($r) => $r['purchase'] && !$r['duplicate']);
+  $other = array_filter($rows, fn($r) => !$r['purchase'] && !$r['duplicate']);
+  $dups = array_filter($rows, fn($r) => $r['duplicate']);
+  $sum = array_sum(array_column($buy, 'amount'));
+  $byCat = [];
+  foreach ($buy as $r) $byCat[$r['category']] = ($byCat[$r['category']] ?? 0) + $r['amount'];
+  arsort($byCat);
+  $fmt = fn($iso) => (new DateTimeImmutable($iso))->format('d.m.Y');
+  $lines = ['📄 Выписка' . ($fileName !== '' ? " «{$fileName}»" : '') . ' · ' . $fmt(min($dates)) . ' — ' . $fmt(max($dates)), '👤 Чья: ' . user_label($payerId), '', 'Найдено операций: ' . count($rows)];
+  $lines[] = '🛒 Новые покупки: ' . count($buy) . ($sum ? ' на ' . fmt_money($sum) : '');
+  $i = 0;
+  foreach ($byCat as $cat => $v) { $lines[] = '   · ' . $cat . ' — ' . fmt_money($v); if (++$i >= 8) break; }
+  $unknown = count(array_filter($buy, fn($r) => $r['category'] === 'Другое'));
+  if ($unknown) $lines[] = "   ($unknown без категории — попадут в «Другое», можно поправить в приложении)";
+  if ($other) $lines[] = '↔️ Переводы, пополнения, снятия: ' . count($other) . ' — по умолчанию не импортирую';
+  if ($dups) $lines[] = '♻️ Уже есть в бюджете: ' . count($dups) . ' — пропущу';
+  return implode("\n", $lines);
+}
+
+function statement_markup(int $userId, int $jobId, array $rows, int $payerId): array {
+  $buy = count(array_filter($rows, fn($r) => $r['purchase'] && !$r['duplicate']));
+  $all = count(array_filter($rows, fn($r) => !$r['duplicate']));
+  $labels = []; $opts = [];
+  if ($buy) { $labels[] = "✅ Импортировать покупки ($buy)"; $opts[] = 'buy'; }
+  if ($all > $buy) { $labels[] = "➕ Всё новое ($all)"; $opts[] = 'all'; }
+  $labels[] = '📋 Список'; $opts[] = 'list';
+  foreach (allowed_members_map() as $id => $name) if ($id !== $payerId) { $labels[] = "👤 Это выписка: $name"; $opts[] = 'payer:' . $id; }
+  $labels[] = '✖️ Отмена'; $opts[] = 'cancel';
+  return bot_keyboard($userId, ['type' => 'statement', 'job' => $jobId, 'payer' => $payerId, 'rows' => $rows, 'opts' => $opts], $labels, 1);
+}
+
+function statement_list_messages(array $rows): array {
+  $out = []; $buf = '';
+  foreach ($rows as $r) {
+    $d = (new DateTimeImmutable($r['date']))->format('d.m');
+    $mark = $r['duplicate'] ? '♻️' : ($r['purchase'] ? '🛒' : '↔️');
+    $line = "$mark $d " . ($r['kind'] === 'expense' ? '−' : '+') . number_format($r['amount'], 0, ',', ' ') . " · {$r['category']} · " . mb_substr($r['note'] ?: $r['type'], 0, 40) . "\n";
+    if (mb_strlen($buf . $line) > 3800) { $out[] = $buf; $buf = ''; }
+    $buf .= $line;
+  }
+  if ($buf !== '') $out[] = $buf;
+  return $out;
+}
+
+// Called by statement_worker.php for each waiting job
+function process_statement_job(array $job): void {
+  $tmp = tempnam(sys_get_temp_dir(), 'stmt');
+  try {
+    telegram_download($job['file_id'], $tmp);
+    $head = (string)file_get_contents($tmp, false, null, 0, 5);
+    $text = $head === '%PDF-' ? pdf_to_text($tmp) : (string)file_get_contents($tmp);
+    $rows = parse_bank_statement($text, (int)$job['telegram_id']);
+    if (!$rows) throw new RuntimeException('Не нашёл в файле операций. Нужна выписка Kaspi Gold в PDF (Kaspi → Kaspi Gold → Выписка).');
+    $payload = ['chat_id' => (int)$job['chat_id'], 'text' => statement_summary($rows, (int)$job['telegram_id'], $job['file_name']),
+      'reply_markup' => statement_markup((int)$job['telegram_id'], (int)$job['id'], $rows, (int)$job['telegram_id'])];
+    if ($job['message_id']) telegram('editMessageText', $payload + ['message_id' => (int)$job['message_id']]);
+    else telegram('sendMessage', $payload);
+    db()->prepare("UPDATE statement_jobs SET status='done' WHERE id=?")->execute([$job['id']]);
+  } catch (Throwable $e) {
+    $msg = $e instanceof RuntimeException ? $e->getMessage() : 'Не удалось разобрать файл';
+    db()->prepare("UPDATE statement_jobs SET status='error',error=? WHERE id=?")->execute([mb_substr($e->getMessage(), 0, 500), $job['id']]);
+    $payload = ['chat_id' => (int)$job['chat_id'], 'text' => '⚠️ ' . $msg];
+    if ($job['message_id']) telegram('editMessageText', $payload + ['message_id' => (int)$job['message_id']]);
+    else telegram('sendMessage', $payload);
+    if (!($e instanceof RuntimeException)) error_log((string)$e);
+  } finally {
+    @unlink($tmp);
+  }
 }

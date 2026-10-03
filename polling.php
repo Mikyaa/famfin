@@ -46,6 +46,7 @@ while (true) {
       if (!in_array($id, $config['allowed_users'], true) || !$chat) continue;
       $name = trim(($from['first_name'] ?? '') . ' ' . ($from['last_name'] ?? ''));
       save_member(['id'=>$id,'name'=>user_label($id, $name)]);
+      if (isset($message['document'])) { bot_handle_document((int)$chat, $id, $message['document']); continue; }
       $text = trim((string)($message['text'] ?? ''));
 
       handle_bot_command($chat, $id, $text, $appUrl);

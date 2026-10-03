@@ -24,6 +24,12 @@ if (!in_array($id, $config['allowed_users'], true) || !$chat) { echo 'ok'; exit;
 $name = trim(($from['first_name'] ?? '') . ' ' . ($from['last_name'] ?? ''));
 save_member(['id'=>$id,'name'=>user_label($id, $name)]);
 
+if (isset($m['document'])) {
+  try { bot_handle_document((int)$chat, $id, $m['document']); } catch (Throwable $e) { error_log((string)$e); }
+  echo 'ok';
+  exit;
+}
+
 $text = trim((string)($m['text'] ?? ''));
 $url = rtrim($config['app_url'], '/');
 

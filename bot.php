@@ -128,6 +128,27 @@ function bot_save_entry(int $userId, array $raw): array {
   return ['id' => $id, 'entry' => $e, 'limits' => $limits];
 }
 
+/* ========== STATEMENT FILES ========== */
+function bot_handle_document(int $chatId, int $userId, array $doc): void {
+  $name = (string)($doc['file_name'] ?? 'файл');
+  $isPdf = ($doc['mime_type'] ?? '') === 'application/pdf' || preg_match('/\.pdf$/i', $name);
+  $isText = preg_match('/\.txt$/i', $name);
+  if (!$isPdf && !$isText) { telegram('sendMessage', ['chat_id' => $chatId, 'text' => 'Пришлите выписку Kaspi Gold в PDF — я разберу её и предложу импорт.']); return; }
+  if ((int)($doc['file_size'] ?? 0) > 20 * 1024 * 1024) { telegram('sendMessage', ['chat_id' => $chatId, 'text' => 'Файл больше 20 МБ — Telegram не даст боту его скачать. Выгрузите выписку за меньший период.']); return; }
+  $r = telegram('sendMessage', ['chat_id' => $chatId, 'text' => "📄 Получил «{$name}». Разбираю выписку — пришлю итог в течение минуты."]);
+  db()->prepare('INSERT INTO statement_jobs(telegram_id,chat_id,file_id,file_name,message_id) VALUES(?,?,?,?,?)')
+    ->execute([$userId, $chatId, (string)$doc['file_id'], mb_substr($name, 0, 200), $r['result']['message_id'] ?? null]);
+}
+
+function bot_statement_entries(array $rows, bool $all): array {
+  $out = [];
+  foreach ($rows as $r) {
+    if ($r['duplicate'] || (!$all && !$r['purchase'])) continue;
+    $out[] = ['kind' => $r['kind'], 'amount' => $r['amount'], 'category' => $r['category'], 'note' => $r['note'], 'date' => $r['date']];
+  }
+  return $out;
+}
+
 /* ========== CALLBACKS ========== */
 function bot_handle_callback(array $cb): void {
   global $config;
@@ -177,6 +198,42 @@ function bot_handle_callback(array $cb): void {
         $e = ['kind' => $tx['kind'], 'amount' => (float)$tx['amount'], 'category' => $tx['category'], 'note' => $tx['note'], 'date' => $tx['occurred_on']];
         $edit(bot_entry_text($e, user_label((int)$tx['telegram_id']), $opt === '__back' ? '✅ Записано' : '✏️ Категория изменена'), bot_tx_markup($userId, (int)$tx['id']));
         $answer($opt === '__back' ? '' : 'Готово');
+        return;
+      case 'statement':
+        $job = db()->prepare('SELECT status FROM statement_jobs WHERE id=?');
+        $job->execute([(int)$p['job']]);
+        $status = $job->fetchColumn();
+        if ($status === 'imported') { $answer('Эта выписка уже импортирована'); return; }
+        if ($opt === 'cancel') { $edit('✖️ Импорт отменён — ничего не записано'); $answer(); return; }
+        if ($opt === 'list') {
+          foreach (statement_list_messages($p['rows']) as $chunk) telegram('sendMessage', ['chat_id' => $chatId, 'text' => "🛒 покупка · ↔️ перевод/пополнение · ♻️ уже есть\n\n" . $chunk]);
+          $answer();
+          return;
+        }
+        if (str_starts_with($opt, 'payer:')) {
+          $payer = (int)substr($opt, 6);
+          if (!is_member_id($payer)) { $answer(); return; }
+          $rows = mark_statement_duplicates($p['rows'], $payer);
+          $edit(statement_summary($rows, $payer), statement_markup($userId, (int)$p['job'], $rows, $payer));
+          $answer('Выписка: ' . user_label($payer));
+          return;
+        }
+        $entries = bot_statement_entries($p['rows'], $opt === 'all');
+        if (!$entries) { $answer('Нечего импортировать'); return; }
+        $ids = import_rows($entries, (int)$p['payer']);
+        db()->prepare("UPDATE statement_jobs SET status='imported' WHERE id=?")->execute([(int)$p['job']]);
+        $sumExp = array_sum(array_map(fn($e) => $e['kind'] === 'expense' ? $e['amount'] : 0, $entries));
+        $sumTop = array_sum(array_map(fn($e) => $e['kind'] === 'topup' ? $e['amount'] : 0, $entries));
+        $text = '✅ Импортировано операций: ' . count($ids) . ' · ' . user_label((int)$p['payer']) . "\nРасходы: " . fmt_money($sumExp) . ($sumTop ? "\nПополнения: " . fmt_money($sumTop) : '') . "\n\nКатегории можно поправить в приложении — нажмите на операцию.";
+        $edit($text, bot_keyboard($userId, ['type' => 'statement_undo', 'ids' => $ids, 'job' => (int)$p['job'], 'opts' => ['undo']], ['↩️ Отменить импорт']));
+        $answer('Готово');
+        return;
+      case 'statement_undo':
+        $n = 0;
+        foreach ($p['ids'] as $id) if (delete_transaction((int)$id)) $n++;
+        db()->prepare("UPDATE statement_jobs SET status='undone' WHERE id=?")->execute([(int)$p['job']]);
+        $edit("↩️ Импорт отменён: удалено операций — $n");
+        $answer('Отменено');
         return;
       case 'rec':
         $r = get_recurring((int)$p['rid']);
