@@ -260,3 +260,121 @@ function telegram_send_photo(string $chatId, string $file, string $caption): arr
   curl_close($ch);
   return json_decode($raw, true) ?: [];
 }
+
+/* ---------- Pinned balance widget ---------- */
+// A pinned photo in the family channel that always shows the shared balance card.
+// The message is edited in place (editMessageMedia), so the pin never moves.
+
+function balance_widget_data(): array {
+  $balances = balances_until((new DateTimeImmutable('tomorrow'))->format('Y-m-d'));
+  [$mFrom, $mUntil] = normalize_period(null, null, 'month');
+  $month = range_summary($mFrom, $mUntil);
+  $total = null;
+  foreach (limits_status(0)['items'] as $i) if ($i['scope'] === 'family' && $i['category'] === TOTAL_LIMIT && $i['period'] === 'month') $total = $i;
+  return ['balances' => $balances, 'month' => $month, 'total_limit' => $total, 'updated' => date('Y-m-d H:i')];
+}
+
+function render_balance_card_png(array $d, string $file): void {
+  $W = 1080; $H = 820; $P = 40;
+  $c = new WrCanvas($W, $H, 2, __DIR__ . '/fonts');
+  $soft = '#A9B0BE';
+  $c->rrect(0, 0, $W, $H, 0, '#141B29');
+  $c->swoosh($W - 400, $W, 120, 30, 50, 85);
+  $x = $P + 52; $y = $P;
+  $c->image(__DIR__ . '/img/logo-mark.png', $x, $y + 48, 72);
+  $c->text('Семейный бюджет', $x + 94, $y + 82, 30, '#FFFFFF', 'SemiBold');
+  $c->text('Общий остаток', $x + 94, $y + 116, 24, $soft);
+  $b = $d['balances'];
+  $bal = $b['shared']['balance'];
+  $c->text(wr_money($bal), $x, $y + 270, 104, $bal < 0 ? '#FF8A95' : '#FFFFFF', 'SemiBold');
+  $stats = [['Внесено всего', $b['shared']['topups']], ['Потрачено всего', $b['shared']['expenses']], ['В этом месяце', $d['month']['expenses']]];
+  foreach ($stats as $i => [$label, $v]) {
+    $c->text($label, $x + $i * 330, $y + 350, 22, $soft);
+    $c->text(wr_money($v), $x + $i * 330, $y + 388, 30, '#FFFFFF', 'SemiBold');
+  }
+
+  // Personal balances as tiles
+  $members = $b['members'];
+  $tileY = $y + 440;
+  $tileW = ($W - 2 * $P - 104 - 20 * (count($members) - 1)) / max(1, count($members));
+  foreach ($members as $i => $m) {
+    $tx = $x + $i * ($tileW + 20);
+    $c->rrect($tx, $tileY, $tileW, 150, 28, '#1D2536');
+    $c->rrect($tx + 26, $tileY + 30, 48, 48, 24, $i % 2 ? '#123D2E' : '#1C2F5E');
+    $c->text(mb_strtoupper(mb_substr($m['name'], 0, 1)), $tx + 50, $tileY + 63, 22, $i % 2 ? '#4CE0AE' : '#8DB5FF', 'SemiBold', 'center');
+    $c->text($c->fit($m['name'], $tileW - 120, 24), $tx + 92, $tileY + 62, 24, $soft);
+    $c->text(wr_money($m['balance']), $tx + 26, $tileY + 122, 36, $m['balance'] < 0 ? '#FF8A95' : '#4CE0AE', 'SemiBold');
+  }
+
+  // Optional monthly total limit
+  $foot = $tileY + 200;
+  if ($l = $d['total_limit']) {
+    $color = ['ok' => '#4CE0AE', 'warn' => '#F5B53F', 'over' => '#FF5C6C'][$l['state']];
+    $tail = $l['remaining'] >= 0 ? 'осталось ' . wr_money($l['remaining']) : 'превышен на ' . wr_money(-$l['remaining']);
+    $barW = $W - 2 * $P - 104;
+    $c->text('Лимит на месяц: ' . wr_money($l['spent']) . ' из ' . wr_money($l['limit']), $x, $foot, 22, $soft);
+    $c->text($tail, $x + $barW, $foot, 22, $color, 'SemiBold', 'right');
+    $c->rrect($x, $foot + 16, $barW, 10, 5, '#2A3448');
+    $c->rrect($x, $foot + 16, max(10, $barW * min(1, $l['percent'] / 100)), 10, 5, $color);
+  }
+  $upd = new DateTimeImmutable($d['updated']);
+  $c->text('Обновлено ' . wr_day($upd->format('Y-m-d')) . ', ' . $upd->format('H:i'), $W - $P - 52, $H - $P - 34, 20, '#6E7790', 'Regular', 'right');
+  $c->png($file);
+}
+
+function balance_widget_caption(array $d): string {
+  $b = $d['balances'];
+  $lines = ['💰 Общий остаток: ' . wr_money($b['shared']['balance'])];
+  $per = [];
+  foreach ($b['members'] as $m) $per[] = $m['name'] . ' ' . wr_money($m['balance']);
+  $lines[] = implode(' · ', $per);
+  $lines[] = 'Потрачено в этом месяце: ' . wr_money($d['month']['expenses']);
+  $upd = new DateTimeImmutable($d['updated']);
+  $lines[] = 'Обновлено ' . wr_day($upd->format('Y-m-d')) . ', ' . $upd->format('H:i');
+  return implode("\n", $lines);
+}
+
+function telegram_multipart(string $method, array $fields): array {
+  global $config;
+  $ch = curl_init('https://api.telegram.org/bot' . $config['bot_token'] . '/' . $method);
+  curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $fields, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 30]);
+  $raw = curl_exec($ch);
+  if ($raw === false) { $err = curl_error($ch); curl_close($ch); throw new RuntimeException($err); }
+  curl_close($ch);
+  return json_decode($raw, true) ?: [];
+}
+
+// Creates and pins the widget the first time, then edits that same message
+function update_balance_widget(string $chatId): string {
+  global $config;
+  $d = balance_widget_data();
+  $caption = balance_widget_caption($d);
+  $markup = json_encode(['inline_keyboard' => [[['text' => 'Открыть бюджет', 'url' => rtrim($config['app_url'], '/') . '/']]]]);
+  $file = tempnam(sys_get_temp_dir(), 'famfin') . '.png';
+  $key = 'balance_widget_msg:' . $chatId;
+  try {
+    render_balance_card_png($d, $file);
+    $msgId = (int)get_setting($key, '0');
+    if ($msgId) {
+      $r = telegram_multipart('editMessageMedia', [
+        'chat_id' => $chatId, 'message_id' => $msgId, 'reply_markup' => $markup,
+        'media' => json_encode(['type' => 'photo', 'media' => 'attach://card', 'caption' => $caption]),
+        'card' => new CURLFile($file, 'image/png', 'balance.png'),
+      ]);
+      if ($r['ok'] ?? false) return "edited $msgId";
+      if (str_contains($r['description'] ?? '', 'not modified')) return "unchanged $msgId";
+      // The pinned message was deleted or can no longer be edited: post a new one
+    }
+    $r = telegram_multipart('sendPhoto', [
+      'chat_id' => $chatId, 'caption' => $caption, 'reply_markup' => $markup, 'disable_notification' => 'true',
+      'photo' => new CURLFile($file, 'image/png', 'balance.png'),
+    ]);
+    if (!($r['ok'] ?? false)) throw new RuntimeException('sendPhoto: ' . ($r['description'] ?? 'unknown'));
+    $newId = (int)$r['result']['message_id'];
+    set_setting($key, (string)$newId);
+    $pin = telegram('pinChatMessage', ['chat_id' => $chatId, 'message_id' => $newId, 'disable_notification' => true]);
+    return "posted $newId" . (($pin['ok'] ?? false) ? ' and pinned' : ' (pin failed: ' . ($pin['description'] ?? '?') . ')');
+  } finally {
+    @unlink($file);
+  }
+}

@@ -175,6 +175,7 @@ try {
     if ($q->rowCount() === 0) {
       json_out(['error'=>'Запись не найдена'], 404);
     }
+    set_setting('balance_widget_dirty', '1');
     json_out(['ok'=>true]);
   }
 
@@ -197,6 +198,7 @@ try {
     $q = db()->prepare('INSERT INTO transactions(telegram_id,kind,amount,category,category_group,note,occurred_on) VALUES(?,?,?,?,?,?,?)');
     $q->execute([$member['id'], $kind, $amount, $category, $group, $note, $date]);
     $id = db()->lastInsertId();
+    set_setting('balance_widget_dirty', '1');
     // Limits never block a record; they only report where the family stands
     $limits = [];
     if ($kind === 'expense') {

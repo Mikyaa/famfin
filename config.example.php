@@ -8,6 +8,7 @@ return [
   'app_url' => 'https://example.com',
   'bot_username' => '', // optional: e.g. 'my_budget_bot', avoids a getMe call per page load
   'report_chat_id' => '', // weekly report target, e.g. '-1001234567890' (bot must be a channel admin)
+  'widget_chat_id' => '', // pinned balance card; defaults to report_chat_id (bot needs edit + pin rights)
   'db' => ['driver'=>'mysql','host'=>'localhost','name'=>'database','user'=>'username','password'=>'password','charset'=>'utf8mb4'],
   'allowed_users' => [854102139, 995540516],
   'user_labels' => [854102139 => 'Миржан', 995540516 => 'Томирис'],
