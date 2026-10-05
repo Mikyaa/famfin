@@ -30,7 +30,7 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="app.css?v=<?= filemtime(__DIR__ . '/app.css') ?>">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -141,18 +141,15 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       <div id="goalsList" class="goals"></div>
     </div>
 
-    <div class="section" id="debtsSection">
-      <div class="section-title"><h2>В долг</h2><button type="button" class="text-button" id="debtAdd">+ Добавить</button></div>
-      <button type="button" class="card debt-summary" id="debtsOpen" aria-label="Открыть список долгов">
-        <span class="debt-line"><span>Мне должны</span><b class="money-pos" id="debtOwedToMe">0 ₸</b></span>
-        <span class="debt-line"><span>Я должен</span><b class="money-neg" id="debtIOwe">0 ₸</b></span>
-        <span class="debt-hint" id="debtHint">Пока никого — нажмите «+ Добавить»</span>
+    <div class="section panel-tiles">
+      <button type="button" class="panel-tile" id="debtsOpen" aria-label="В долг: открыть">
+        <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h11l-3-3M17 17H6l3 3"/></svg></span>
+        <span class="panel-text"><b>В долг</b><small id="debtTileSub">Добавить запись</small></span>
       </button>
-    </div>
-
-    <div class="section" id="depositsSection">
-      <div class="section-title"><h2>Депозиты</h2><button type="button" class="text-button" id="depositAdd">+ Добавить</button></div>
-      <div id="depositsList" class="card deposits"></div>
+      <button type="button" class="panel-tile" id="depositsOpen" aria-label="Депозиты: открыть">
+        <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10 12 4l9 6M5 10v8M9.5 10v8M14.5 10v8M19 10v8M3 20h18"/></svg></span>
+        <span class="panel-text"><b>Депозиты</b><small id="depositTileSub">Добавить депозит</small></span>
+      </button>
     </div>
 
     <div class="section" id="limitsSection">
@@ -575,6 +572,43 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
   </div>
 </div>
 
+<div class="sheet" id="depositsSheet" hidden>
+  <div class="sheet-backdrop" data-deposits-close></div>
+  <div class="sheet-content" role="dialog" aria-labelledby="depositsTitle">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header"><h2 id="depositsTitle">Депозиты</h2><button class="sheet-close" data-deposits-close aria-label="Закрыть">×</button></div>
+    <div class="sheet-body">
+      <div class="deposit-total" id="depositsTotal"></div>
+      <div id="depositsList" class="debts-list"></div>
+      <button type="button" class="sheet-submit" id="depositAdd">+ Новый депозит</button>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="depositSheet" hidden>
+  <div class="sheet-backdrop" data-deposit-sheet-close></div>
+  <div class="sheet-content" role="dialog" aria-labelledby="depositSheetTitle">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header"><h2 id="depositSheetTitle">Депозит</h2><button class="sheet-close" data-deposit-sheet-close aria-label="Закрыть">×</button></div>
+    <div class="sheet-body">
+      <div class="debt-current" id="depositBalance"></div>
+      <div class="group-toggle three" id="depositKind">
+        <button type="button" data-kind="in" class="selected">Пополнить</button>
+        <button type="button" data-kind="out">Снять</button>
+        <button type="button" data-kind="interest">Проценты</button>
+      </div>
+      <div class="deposit-form">
+        <input id="depositMoveAmount" class="note-input" inputmode="numeric" placeholder="Сумма, ₸" autocomplete="off" aria-label="Сумма операции">
+        <input id="depositMoveNote" class="note-input" maxlength="300" placeholder="Комментарий (необязательно)" autocomplete="off" aria-label="Комментарий">
+        <button type="button" class="sheet-submit" id="depositMoveSave">Записать</button>
+      </div>
+      <div class="limit-group-title">Журнал операций</div>
+      <div id="depositJournal" class="journal"></div>
+      <button type="button" class="secondary-button" id="depositEdit">Изменить название, банк, ставку</button>
+    </div>
+  </div>
+</div>
+
 <div class="cal-modal" id="depositModal" hidden>
   <div class="cal-backdrop" data-deposit-close></div>
   <div class="cal-content small" role="dialog" aria-labelledby="depositTitle">
@@ -582,7 +616,7 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
     <div class="cat-form">
       <label>Название<input id="depositName" maxlength="80" placeholder="Например, На квартиру" autocomplete="off"></label>
       <label>Банк <span class="optional">необязательно</span><input id="depositBank" maxlength="80" placeholder="Kaspi, Halyk, Freedom…" autocomplete="off"></label>
-      <label>Сумма на депозите, ₸<input id="depositAmount" inputmode="numeric" placeholder="1 000 000" autocomplete="off"></label>
+      <label id="depositAmountLabel">Сумма при открытии, ₸ <span class="optional">необязательно</span><input id="depositAmount" inputmode="numeric" placeholder="1 000 000" autocomplete="off"></label>
       <label>Ставка, % годовых <span class="optional">необязательно</span><input id="depositRate" inputmode="decimal" placeholder="14,5" autocomplete="off"></label>
       <label>Комментарий <span class="optional">необязательно</span><input id="depositNote" maxlength="300" autocomplete="off"></label>
       <button id="depositSave" class="sheet-submit" type="button">Сохранить</button>
@@ -613,6 +647,6 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
 </div>
 
 <script>window.BOT_USERNAME=<?= json_encode($botUser) ?>;window.LOCAL_DEV=<?= json_encode($localDev) ?>;</script>
-<script src="app.js"></script>
+<script src="app.js?v=<?= filemtime(__DIR__ . '/app.js') ?>"></script>
 </body>
 </html>

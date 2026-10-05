@@ -677,3 +677,25 @@ button.group-row:active,button.category-row:active{background:var(--bg)}
 .danger-button:disabled{opacity:.6;cursor:not-allowed}
 .danger-button:active:not(:disabled){background:var(--red-soft)}
 .reset-status{margin-top:10px;padding:12px 14px;border-radius:var(--r-md);background:var(--warn-soft);color:var(--warn);font-size:14px;line-height:1.6}
+
+/* ---------- Panel tiles: "В долг", "Депозиты" ---------- */
+.panel-tiles{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.panel-tile{display:flex;flex-direction:column;align-items:flex-start;gap:12px;min-height:116px;padding:16px;border:1px solid var(--line);border-radius:var(--r-xl);background:var(--card);text-align:left;font:inherit;color:inherit;cursor:pointer;transition:transform .12s ease}
+.panel-tile:active{transform:scale(.98);background:var(--bg)}
+.panel-icon{width:40px;height:40px;border-radius:50%;background:var(--primary-soft);color:var(--primary);display:grid;place-items:center}
+.panel-icon svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.panel-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.panel-text b{font-size:16px;font-weight:600}
+.panel-text small{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;line-height:1.35}
+.deposit-form{display:flex;flex-direction:column;gap:8px}
+.journal{display:flex;flex-direction:column}
+.journal-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line-soft)}
+.journal-row:last-child{border-bottom:0}
+.journal-main{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
+.journal-main b{font-size:15px;font-weight:600}
+.journal-main small{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.journal-row>b{font-weight:600;white-space:nowrap;font-variant-numeric:tabular-nums}
+#depositsSheet .deposit-total{border-top:0;padding:0 2px 4px;font-size:16px}
+#depositsSheet .deposit-total b{font-size:20px;font-weight:600}
+#depositBalance{flex-direction:column;align-items:flex-start;gap:4px}
+#depositBalance b{font-size:28px;white-space:nowrap;letter-spacing:-.6px}

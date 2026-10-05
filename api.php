@@ -50,7 +50,14 @@ try {
   if ($method === 'POST' && $action === 'debt_save') { $id = debt_save(body(), $member); json_out(['ok' => true, 'id' => $id, 'debts' => debts_list()]); }
   if ($method === 'POST' && $action === 'debt_move') { $d = body(); debt_move((int)($d['id'] ?? 0), $d['amount'] ?? null, (string)($d['note'] ?? ''), $member); json_out(['ok' => true, 'debts' => debts_list()]); }
   if ($method === 'POST' && $action === 'debt_delete') { debt_delete((int)(body()['id'] ?? 0)); json_out(['ok' => true, 'debts' => debts_list()]); }
-  if ($method === 'POST' && $action === 'deposit_save') { deposit_save(body(), $member); json_out(['ok' => true, 'deposits' => deposits_list()]); }
+  if ($method === 'POST' && $action === 'deposit_save') { $id = deposit_save(body(), $member); json_out(['ok' => true, 'id' => $id, 'deposits' => deposits_list()]); }
+  if ($method === 'GET' && $action === 'deposit') { json_out(['moves' => deposit_journal((int)($_GET['id'] ?? 0))]); }
+  if ($method === 'POST' && $action === 'deposit_move') {
+    $d = body();
+    deposit_move((int)($d['id'] ?? 0), (string)($d['kind'] ?? ''), $d['amount'] ?? null, (string)($d['note'] ?? ''), (string)($d['date'] ?? ''), $member);
+    json_out(['ok' => true, 'deposits' => deposits_list()]);
+  }
+  if ($method === 'POST' && $action === 'deposit_move_delete') { deposit_move_delete((int)(body()['id'] ?? 0)); json_out(['ok' => true, 'deposits' => deposits_list()]); }
   if ($method === 'POST' && $action === 'deposit_delete') { deposit_delete((int)(body()['id'] ?? 0)); json_out(['ok' => true, 'deposits' => deposits_list()]); }
   if ($method === 'POST' && $action === 'reset_request') { json_out(['ok' => true, 'reset' => reset_request($member)]); }
 

@@ -926,6 +926,7 @@ function debts_schema(PDO $pdo): void {
     $pdo->exec("CREATE TABLE IF NOT EXISTS debt_moves(id INTEGER PRIMARY KEY AUTOINCREMENT,debt_id INTEGER NOT NULL,amount NUMERIC NOT NULL,occurred_on TEXT NOT NULL,note TEXT NOT NULL DEFAULT '',created_by INTEGER NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);");
     $pdo->exec("CREATE TABLE IF NOT EXISTS deposits(id INTEGER PRIMARY KEY AUTOINCREMENT,title TEXT NOT NULL,bank TEXT NOT NULL DEFAULT '',amount NUMERIC NOT NULL DEFAULT 0,rate NUMERIC NULL,note TEXT NOT NULL DEFAULT '',created_by INTEGER NULL,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);");
     $pdo->exec("CREATE TABLE IF NOT EXISTS reset_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,initiator INTEGER NOT NULL,approvals TEXT NOT NULL DEFAULT '[]',status TEXT NOT NULL DEFAULT 'pending',created_at TEXT DEFAULT CURRENT_TIMESTAMP);");
+    deposit_moves_schema($pdo);
     return;
   }
   $cs = 'DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci';
@@ -933,6 +934,7 @@ function debts_schema(PDO $pdo): void {
   $pdo->exec("CREATE TABLE IF NOT EXISTS debt_moves(id BIGINT AUTO_INCREMENT PRIMARY KEY,debt_id BIGINT NOT NULL,amount DECIMAL(14,2) NOT NULL,occurred_on DATE NOT NULL,note VARCHAR(300) NOT NULL DEFAULT '',created_by BIGINT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) $cs");
   $pdo->exec("CREATE TABLE IF NOT EXISTS deposits(id BIGINT AUTO_INCREMENT PRIMARY KEY,title VARCHAR(80) NOT NULL,bank VARCHAR(80) NOT NULL DEFAULT '',amount DECIMAL(14,2) NOT NULL DEFAULT 0,rate DECIMAL(6,2) NULL,note VARCHAR(300) NOT NULL DEFAULT '',created_by BIGINT NULL,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) $cs");
   $pdo->exec("CREATE TABLE IF NOT EXISTS reset_requests(id BIGINT AUTO_INCREMENT PRIMARY KEY,initiator BIGINT NOT NULL,approvals VARCHAR(255) NOT NULL DEFAULT '[]',status VARCHAR(10) NOT NULL DEFAULT 'pending',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) $cs");
+  deposit_moves_schema($pdo);
 }
 
 // direction: 'owed_to_me' (they owe me, shown green +) or 'i_owe' (I owe them, shown red −)
@@ -1005,40 +1007,88 @@ function debt_delete(int $id): void {
   db()->prepare('DELETE FROM debts WHERE id=?')->execute([$id]);
 }
 
+// A deposit's balance is the sum of its journal: opening amount, top-ups, withdrawals, interest
+const DEPOSIT_MOVE_KINDS = ['init' => 'Открытие', 'in' => 'Пополнение', 'out' => 'Снятие', 'interest' => 'Проценты'];
+
+function deposit_moves_schema(PDO $pdo): void {
+  if (is_sqlite()) {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS deposit_moves(id INTEGER PRIMARY KEY AUTOINCREMENT,deposit_id INTEGER NOT NULL,kind TEXT NOT NULL,amount NUMERIC NOT NULL,occurred_on TEXT NOT NULL,note TEXT NOT NULL DEFAULT '',created_by INTEGER NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);");
+  } else {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS deposit_moves(id BIGINT AUTO_INCREMENT PRIMARY KEY,deposit_id BIGINT NOT NULL,kind VARCHAR(10) NOT NULL,amount DECIMAL(14,2) NOT NULL,occurred_on DATE NOT NULL,note VARCHAR(300) NOT NULL DEFAULT '',created_by BIGINT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+  }
+  // Deposits saved before the journal existed: their amount becomes the opening entry
+  $pdo->exec("INSERT INTO deposit_moves(deposit_id,kind,amount,occurred_on,note) SELECT id,'init',amount," . (is_sqlite() ? "date(updated_at)" : "DATE(updated_at)") . ",'Остаток на начало' FROM deposits WHERE amount<>0 AND id NOT IN (SELECT deposit_id FROM deposit_moves)");
+}
+
 function deposits_list(): array {
+  $sums = [];
+  foreach (db()->query('SELECT deposit_id,SUM(amount) s,COUNT(*) n,MAX(occurred_on) last FROM deposit_moves GROUP BY deposit_id') as $r) $sums[(int)$r['deposit_id']] = $r;
   $out = [];
-  foreach (db()->query('SELECT * FROM deposits ORDER BY amount DESC,id') as $r) {
-    $out[] = ['id' => (int)$r['id'], 'title' => $r['title'], 'bank' => $r['bank'], 'amount' => (float)$r['amount'],
-      'rate' => $r['rate'] === null ? null : (float)$r['rate'], 'note' => $r['note'], 'updated_at' => $r['updated_at']];
+  foreach (db()->query('SELECT * FROM deposits ORDER BY id') as $r) {
+    $id = (int)$r['id'];
+    $out[] = ['id' => $id, 'title' => $r['title'], 'bank' => $r['bank'], 'amount' => round((float)($sums[$id]['s'] ?? 0), 2),
+      'rate' => $r['rate'] === null ? null : (float)$r['rate'], 'note' => $r['note'], 'moves' => (int)($sums[$id]['n'] ?? 0), 'last_move' => $sums[$id]['last'] ?? null];
   }
   return $out;
 }
 
+function deposit_journal(int $id): array {
+  $q = db()->prepare('SELECT id,kind,amount,occurred_on,note FROM deposit_moves WHERE deposit_id=? ORDER BY occurred_on DESC,id DESC');
+  $q->execute([$id]);
+  return array_map(fn($m) => $m + ['label' => DEPOSIT_MOVE_KINDS[$m['kind']] ?? $m['kind']], $q->fetchAll());
+}
+
+// New deposit: name, bank, rate and an optional opening amount; editing changes only the description
 function deposit_save(array $d, array $member): int {
   $title = trim((string)($d['title'] ?? ''));
   $bank = trim((string)($d['bank'] ?? ''));
   $note = trim((string)($d['note'] ?? ''));
-  $raw = str_replace([' ', "\u{00A0}", ','], ['', '', '.'], (string)($d['amount'] ?? '0'));
-  $amount = $raw === '' ? 0.0 : filter_var($raw, FILTER_VALIDATE_FLOAT);
   $rateRaw = trim(str_replace(',', '.', (string)($d['rate'] ?? '')));
   $rate = $rateRaw === '' ? null : filter_var($rateRaw, FILTER_VALIDATE_FLOAT);
-  if ($title === '' || mb_strlen($title) > 80 || mb_strlen($bank) > 80 || mb_strlen($note) > 300) throw new RuntimeException('Укажите название депозита');
-  if ($amount === false || $amount < 0 || $amount > 10000000000) throw new RuntimeException('Неверная сумма');
+  if ($title === '' || mb_strlen($title) > 80 || mb_strlen($bank) > 80 || mb_strlen($note) > 300) throw new RuntimeException('Назовите депозит');
   if ($rate === false || ($rate !== null && ($rate < 0 || $rate > 100))) throw new RuntimeException('Ставка — от 0 до 100%');
   $id = (int)($d['id'] ?? 0);
   if ($id) {
-    db()->prepare('UPDATE deposits SET title=?,bank=?,amount=?,rate=?,note=?,updated_at=CURRENT_TIMESTAMP WHERE id=?')->execute([$title, $bank, round($amount, 2), $rate, $note, $id]);
+    db()->prepare('UPDATE deposits SET title=?,bank=?,rate=?,note=?,updated_at=CURRENT_TIMESTAMP WHERE id=?')->execute([$title, $bank, $rate, $note, $id]);
     return $id;
   }
-  db()->prepare('INSERT INTO deposits(title,bank,amount,rate,note,created_by) VALUES(?,?,?,?,?,?)')->execute([$title, $bank, round($amount, 2), $rate, $note, $member['id']]);
-  return (int)db()->lastInsertId();
+  $openRaw = str_replace([' ', "\u{00A0}", ','], ['', '', '.'], (string)($d['amount'] ?? ''));
+  $open = $openRaw === '' ? 0.0 : filter_var($openRaw, FILTER_VALIDATE_FLOAT);
+  if ($open === false || $open < 0 || $open > 10000000000) throw new RuntimeException('Неверная сумма');
+  $pdo = db();
+  $pdo->beginTransaction();
+  try {
+    $pdo->prepare('INSERT INTO deposits(title,bank,amount,rate,note,created_by) VALUES(?,?,0,?,?,?)')->execute([$title, $bank, $rate, $note, $member['id']]);
+    $id = (int)$pdo->lastInsertId();
+    if ($open > 0) $pdo->prepare('INSERT INTO deposit_moves(deposit_id,kind,amount,occurred_on,note,created_by) VALUES(?,?,?,?,?,?)')->execute([$id, 'init', round($open, 2), date('Y-m-d'), 'Остаток на начало', $member['id']]);
+    $pdo->commit();
+  } catch (Throwable $e) { $pdo->rollBack(); throw $e; }
+  return $id;
 }
 
-function deposit_delete(int $id): void { db()->prepare('DELETE FROM deposits WHERE id=?')->execute([$id]); }
+function deposit_move(int $id, string $kind, $amount, string $note, string $date, array $member): void {
+  if (!in_array($kind, ['in', 'out', 'interest'], true)) throw new RuntimeException('Неверный тип операции');
+  $v = parse_amount($amount);
+  if ($v === null) throw new RuntimeException('Введите сумму');
+  if ($date === '') $date = date('Y-m-d');
+  if (!valid_date($date)) throw new RuntimeException('Неверная дата');
+  $balance = 0.0;
+  foreach (deposits_list() as $dep) if ($dep['id'] === $id) $balance = $dep['amount'];
+  if ($kind === 'out' && $v > $balance + 0.005) throw new RuntimeException('На депозите только ' . fmt_money($balance));
+  db()->prepare('INSERT INTO deposit_moves(deposit_id,kind,amount,occurred_on,note,created_by) VALUES(?,?,?,?,?,?)')
+    ->execute([$id, $kind, $kind === 'out' ? -$v : $v, $date, mb_substr(trim($note), 0, 300), $member['id']]);
+}
+
+function deposit_move_delete(int $moveId): void { db()->prepare('DELETE FROM deposit_moves WHERE id=?')->execute([$moveId]); }
+
+function deposit_delete(int $id): void {
+  db()->prepare('DELETE FROM deposit_moves WHERE deposit_id=?')->execute([$id]);
+  db()->prepare('DELETE FROM deposits WHERE id=?')->execute([$id]);
+}
 
 /* ========== DATA RESET (both members confirm in Telegram) ========== */
 const RESET_TABLES = ['transactions', 'transfers', 'goals', 'goal_moves', 'recurring', 'spend_limits', 'limit_notices', 'balance_adjustments',
-  'debts', 'debt_moves', 'deposits', 'custom_categories', 'statement_jobs'];
+  'debts', 'debt_moves', 'deposits', 'deposit_moves', 'custom_categories', 'statement_jobs'];
 
 function reset_pending(): ?array {
   $r = db()->query("SELECT * FROM reset_requests WHERE status='pending' ORDER BY id DESC LIMIT 1")->fetch();

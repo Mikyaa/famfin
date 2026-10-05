@@ -1681,10 +1681,11 @@ function renderDebts(debts){
   const c = cur(currency);
   const t = {owed_to_me: 0, i_owe: 0};
   debtsCache.forEach(d => { if (!d.closed) t[d.direction] += d.amount; });
-  $('#debtOwedToMe').textContent = (t.owed_to_me ? '+' : '') + money(t.owed_to_me) + ' ' + c;
-  $('#debtIOwe').textContent = (t.i_owe ? '−' : '') + money(t.i_owe) + ' ' + c;
   const open = debtsCache.filter(d => !d.closed);
-  $('#debtHint').textContent = open.length ? `${open.length} ${open.length === 1 ? 'запись' : open.length < 5 ? 'записи' : 'записей'} — нажмите, чтобы открыть` : 'Пока никого — нажмите «+ Добавить»';
+  // Tile: just the two totals, everything else is inside
+  $('#debtTileSub').innerHTML = open.length
+    ? [t.owed_to_me ? `<span class="money-pos">+${money(t.owed_to_me)}</span>` : '', t.i_owe ? `<span class="money-neg">−${money(t.i_owe)}</span>` : ''].filter(Boolean).join(' · ') + ' ' + c
+    : 'Добавить запись';
   if (!$('#debtsSheet').hidden) renderDebtsSheet();
 }
 
@@ -1773,34 +1774,88 @@ $('#debtDelete').onclick = async () => {
   catch(e) { notice(e.message); }
 };
 $('#debtsOpen').onclick = openDebtsSheet;
-$('#debtAdd').onclick = () => openDebtModal();
 $('#debtAdd2').onclick = () => openDebtModal();
 $$('#debtsSheet [data-debts-close]').forEach(el => el.onclick = closeDebtsSheet);
 
 /* ========== DEPOSITS ========== */
-let depositsCache = [], depositEditing = null;
+// Several named deposits; each has its own journal and its balance is the sum of the journal
+let depositsCache = [], depositEditing = null, depositOpen = null, depositKind = 'in';
+const DEPOSIT_KIND_LABEL = {init: 'Открытие', in: 'Пополнение', out: 'Снятие', interest: 'Проценты'};
+const plural = (n, one, few, many) => { const m10 = n % 10, m100 = n % 100; return m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many; };
+
 function renderDeposits(deposits){
   depositsCache = deposits || [];
   const c = cur(currency);
-  if (!depositsCache.length) {
-    $('#depositsList').innerHTML = '<div class="limits-empty"><p>Добавьте депозиты, чтобы видеть, сколько отложено в банках.</p><button type="button" class="limits-empty-btn" data-deposit-new>Добавить депозит</button></div>';
-    $('#depositsList [data-deposit-new]').onclick = () => openDepositModal();
-    return;
-  }
   const total = depositsCache.reduce((s, d) => s + d.amount, 0);
-  $('#depositsList').innerHTML = depositsCache.map(d => `
-    <button type="button" class="deposit-row" data-deposit="${d.id}">
-      <span class="debt-row-main"><b>${safe(d.title)}</b><small>${[d.bank && safe(d.bank), d.rate !== null && String(d.rate).replace('.', ',') + '% годовых'].filter(Boolean).join(' · ') || 'депозит'}</small></span>
-      <b>${money(d.amount)} ${c}</b>
-    </button>`).join('') + (depositsCache.length > 1 ? `<div class="deposit-total"><span>Всего на депозитах</span><b>${money(total)} ${c}</b></div>` : '');
-  $$('#depositsList [data-deposit]').forEach(b => b.onclick = () => openDepositModal(depositsCache.find(d => d.id === Number(b.dataset.deposit))));
+  $('#depositTileSub').textContent = depositsCache.length ? `${depositsCache.length} ${plural(depositsCache.length, 'депозит', 'депозита', 'депозитов')} · ${money(total)} ${c}` : 'Добавить депозит';
+  if (!$('#depositsSheet').hidden) renderDepositsSheet();
+  if (depositOpen && !$('#depositSheet').hidden) {
+    const fresh = depositsCache.find(d => d.id === depositOpen.id);
+    if (fresh) openDeposit(fresh); else closeDeposit();
+  }
 }
+
+function renderDepositsSheet(){
+  const c = cur(currency);
+  const total = depositsCache.reduce((s, d) => s + d.amount, 0);
+  $('#depositsTotal').innerHTML = `<span>Всего на депозитах</span><b>${money(total)} ${c}</b>`;
+  $('#depositsList').innerHTML = depositsCache.length ? depositsCache.map(d => `
+    <button type="button" class="debt-row" data-deposit="${d.id}">
+      <span class="debt-row-main"><b>${safe(d.title)}</b><small>${[d.bank && safe(d.bank), d.rate !== null && String(d.rate).replace('.', ',') + '% годовых', d.moves + ' ' + plural(d.moves, 'операция', 'операции', 'операций')].filter(Boolean).join(' · ')}</small></span>
+      <b>${money(d.amount)} ${c}</b>
+    </button>`).join('') : '<div class="empty">Депозитов пока нет</div>';
+  $$('#depositsList [data-deposit]').forEach(b => b.onclick = () => openDeposit(depositsCache.find(d => d.id === Number(b.dataset.deposit))));
+}
+
+function openDepositsSheet(){ renderDepositsSheet(); const s = $('#depositsSheet'); s.hidden = false; s.classList.remove('closing'); }
+const closeDepositsSheet = () => animateClose($('#depositsSheet'));
+
+// One deposit: balance, quick operation form and its journal
+async function openDeposit(dep){
+  depositOpen = dep;
+  const c = cur(currency);
+  $('#depositSheetTitle').textContent = dep.title;
+  $('#depositBalance').innerHTML = `<span>${[dep.bank && safe(dep.bank), dep.rate !== null && String(dep.rate).replace('.', ',') + '% годовых'].filter(Boolean).join(' · ') || 'Баланс'}</span><b>${money(dep.amount)} ${c}</b>`;
+  depositKind = 'in';
+  $$('#depositKind button').forEach(b => b.classList.toggle('selected', b.dataset.kind === 'in'));
+  $('#depositMoveAmount').value = ''; $('#depositMoveNote').value = '';
+  const s = $('#depositSheet'); s.hidden = false; s.classList.remove('closing');
+  $('#depositJournal').innerHTML = '<div class="loading-placeholder"><div class="spinner"></div></div>';
+  try {
+    const d = await request('api.php?action=deposit&id=' + dep.id);
+    $('#depositJournal').innerHTML = d.moves.length ? d.moves.map(m => `
+      <div class="journal-row">
+        <span class="journal-main"><b>${DEPOSIT_KIND_LABEL[m.kind] || safe(m.label)}</b><small>${fmtDate(m.occurred_on)}${m.note ? ' · ' + safe(m.note) : ''}</small></span>
+        <b class="${m.amount < 0 ? 'money-neg' : 'money-pos'}">${m.amount < 0 ? '−' : '+'}${money(Math.abs(m.amount))}</b>
+        <button type="button" class="tx-delete" data-move="${m.id}" aria-label="Удалить операцию">×</button>
+      </div>`).join('') : '<div class="empty">Операций пока нет</div>';
+    $$('#depositJournal [data-move]').forEach(b => b.onclick = async () => {
+      if (!(await showConfirm('Удалить эту операцию из журнала?'))) return;
+      try { const r = await request('api.php?action=deposit_move_delete', {method: 'POST', body: JSON.stringify({id: Number(b.dataset.move)})}); renderDeposits(r.deposits); notice('Удалено', true); }
+      catch(e) { notice(e.message); }
+    });
+  } catch(e) { $('#depositJournal').innerHTML = `<div class="empty">${safe(e.message)}</div>`; }
+}
+function closeDeposit(){ depositOpen = null; return animateClose($('#depositSheet')); }
+
+$$('#depositKind button').forEach(b => b.onclick = () => { depositKind = b.dataset.kind; haptic('select'); $$('#depositKind button').forEach(x => x.classList.toggle('selected', x === b)); });
+$('#depositMoveSave').onclick = async () => {
+  const v = Number(digitsOnly($('#depositMoveAmount').value));
+  if (!v) { notice('Введите сумму'); $('#depositMoveAmount').focus(); return; }
+  try {
+    const d = await request('api.php?action=deposit_move', {method: 'POST', body: JSON.stringify({id: depositOpen.id, kind: depositKind, amount: v, note: $('#depositMoveNote').value})});
+    haptic('success'); notice({in: 'Пополнение записано ✓', out: 'Снятие записано ✓', interest: 'Проценты записаны ✓'}[depositKind], true); renderDeposits(d.deposits);
+  } catch(e) { haptic('error'); notice(e.message); }
+};
+$('#depositEdit').onclick = () => openDepositModal(depositOpen);
+
 function openDepositModal(dep = null){
   depositEditing = dep;
-  $('#depositTitle').textContent = dep ? dep.title : 'Новый депозит';
+  $('#depositTitle').textContent = dep ? 'Изменить депозит' : 'Новый депозит';
   $('#depositName').value = dep ? dep.title : '';
   $('#depositBank').value = dep ? dep.bank : '';
-  $('#depositAmount').value = dep ? money(dep.amount) : '';
+  $('#depositAmount').value = '';
+  $('#depositAmountLabel').hidden = Boolean(dep);
   $('#depositRate').value = dep && dep.rate !== null ? String(dep.rate).replace('.', ',') : '';
   $('#depositNote').value = dep ? dep.note : '';
   $('#depositDelete').hidden = !dep;
@@ -1813,15 +1868,20 @@ $('#depositSave').onclick = async () => {
   try {
     const d = await request('api.php?action=deposit_save', {method: 'POST', body: JSON.stringify({id: depositEditing?.id, title: $('#depositName').value, bank: $('#depositBank').value,
       amount: digitsOnly($('#depositAmount').value), rate: $('#depositRate').value, note: $('#depositNote').value})});
-    haptic('success'); notice('Депозит сохранён ✓', true); closeDepositModal(); renderDeposits(d.deposits);
+    haptic('success'); notice(depositEditing ? 'Сохранено ✓' : 'Депозит добавлен ✓', true); closeDepositModal(); renderDeposits(d.deposits);
+    if (!depositEditing) { const created = d.deposits.find(x => x.id === d.id); if (created) openDeposit(created); }
   } catch(e) { haptic('error'); notice(e.message); }
 };
 $('#depositDelete').onclick = async () => {
-  if (!depositEditing || !(await showConfirm(`Удалить депозит «${depositEditing.title}»?`))) return;
+  if (!depositEditing || !(await showConfirm(`Удалить депозит «${depositEditing.title}» вместе с журналом?`))) return;
   try { const d = await request('api.php?action=deposit_delete', {method: 'POST', body: JSON.stringify({id: depositEditing.id})}); closeDepositModal(); renderDeposits(d.deposits); notice('Удалено', true); }
   catch(e) { notice(e.message); }
 };
+$('#depositsOpen').onclick = openDepositsSheet;
 $('#depositAdd').onclick = () => openDepositModal();
+$$('#depositsSheet [data-deposits-close]').forEach(el => el.onclick = closeDepositsSheet);
+$$('#depositSheet [data-deposit-sheet-close]').forEach(el => el.onclick = closeDeposit);
+$('#depositMoveAmount').oninput = e => { const v = digitsOnly(e.target.value); e.target.value = v ? money(Number(v)) : ''; };
 
 /* ========== DATA RESET ========== */
 function renderResetStatus(r){
@@ -1860,13 +1920,14 @@ tg?.onEvent?.('themeChanged', applyTheme);
 
 /* ========== TELEGRAM BACK BUTTON ========== */
 // Closes the topmost open layer, like the system back gesture would
-const LAYERS = ['#confirmModal', '#calModal', '#rangeCalModal', '#customCatModal', '#goalModal', '#moveModal', '#recModal', '#debtModal', '#depositModal', '#importSheet', '#debtsSheet', '#drillSheet', '#profileSheet', '#sheet'];
+const LAYERS = ['#confirmModal', '#calModal', '#rangeCalModal', '#customCatModal', '#goalModal', '#moveModal', '#recModal', '#debtModal', '#depositModal', '#importSheet', '#depositSheet', '#depositsSheet', '#debtsSheet', '#drillSheet', '#profileSheet', '#sheet'];
 function topLayer(){ return LAYERS.find(sel => !$(sel).hidden) || null; }
 function closeTopLayer(){
   const top = topLayer();
   ({'#calModal': closeSheetCalendar, '#rangeCalModal': closeRangeCalendar, '#customCatModal': closeCustomCatModal, '#goalModal': closeGoalModal,
     '#moveModal': closeMoveModal, '#recModal': closeRecModal, '#importSheet': closeImport, '#drillSheet': closeDrill,
     '#debtModal': closeDebtModal, '#depositModal': closeDepositModal, '#debtsSheet': closeDebtsSheet,
+    '#depositSheet': closeDeposit, '#depositsSheet': closeDepositsSheet,
     '#profileSheet': () => closeProfile(), '#sheet': () => closeSheet(), '#confirmModal': () => $('#confirmCancel').click()})[top]?.();
 }
 function syncBackButton(){
