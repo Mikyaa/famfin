@@ -2745,9 +2745,50 @@ $('#tripSave').onclick = async () => {
   } catch(e) { haptic('error'); notice(e.message); }
 };
 
+/* ========== GUIDE ========== */
+// Full-screen page over the app: «Назад» (or Telegram's back button) returns to the main tab
+function openGuide(){
+  const g = $('#guidePage');
+  if (!$('#guideNav').children.length) {
+    $('#guideNav').innerHTML = $$('#guidePage .guide-sec').map(sec => `<button type="button" data-guide-go="${sec.id}">${safe(sec.dataset.title)}</button>`).join('');
+    $$('[data-guide-go]').forEach(b => b.onclick = () => { const t = $('#' + b.dataset.guideGo); g.scrollTo({top: t.offsetTop - $('.guide-top').offsetHeight - 8, behavior: 'smooth'}); });
+  }
+  $('#guideSearch').value = ''; filterGuide();
+  $$('#guidePage details').forEach(d => { d.open = false; });
+  g.hidden = false; g.scrollTop = 0;
+  document.body.style.overflow = 'hidden';
+}
+async function closeGuide(){
+  $('#guidePage').hidden = true;
+  document.body.style.overflow = '';
+  if (!$('#profileSheet').hidden) await closeProfile(true);
+  switchTab('main');
+  window.scrollTo({top: 0});
+}
+function filterGuide(){
+  const q = $('#guideSearch').value.trim().toLowerCase();
+  let any = false;
+  $$('#guidePage .guide-sec').forEach(sec => {
+    let shown = 0;
+    sec.querySelectorAll('details').forEach(d => {
+      const hit = !q || d.textContent.toLowerCase().includes(q);
+      d.hidden = !hit;
+      if (q && hit) d.open = true; else if (!q) d.open = false;
+      if (hit) shown++;
+    });
+    sec.hidden = !shown;
+    if (shown) any = true;
+  });
+  $('#guideEmpty').hidden = any;
+  $('#guideNav').hidden = Boolean(q);
+}
+$('#guideOpen').onclick = openGuide;
+$('#guideBack').onclick = $('#guideBack2').onclick = closeGuide;
+$('#guideSearch').oninput = filterGuide;
+
 /* ========== TELEGRAM BACK BUTTON ========== */
 // Closes the topmost open layer, like the system back gesture would
-const LAYERS = ['#confirmModal', '#photoModal', '#catPdfModal', '#tripModal', '#tripsSheet', '#shopSheet', '#planSheet', '#calendarSheet', '#auditSheet', '#trashSheet', '#calModal', '#rangeCalModal', '#customCatModal', '#goalModal', '#moveModal', '#recModal', '#debtModal', '#depositModal', '#accountModal', '#catEditModal', '#importSheet', '#accountSheet', '#accountsSheet', '#catsSheet', '#depositSheet', '#depositsSheet', '#debtsSheet', '#drillSheet', '#profileSheet', '#sheet'];
+const LAYERS = ['#confirmModal', '#guidePage', '#photoModal', '#catPdfModal', '#tripModal', '#tripsSheet', '#shopSheet', '#planSheet', '#calendarSheet', '#auditSheet', '#trashSheet', '#calModal', '#rangeCalModal', '#customCatModal', '#goalModal', '#moveModal', '#recModal', '#debtModal', '#depositModal', '#accountModal', '#catEditModal', '#importSheet', '#accountSheet', '#accountsSheet', '#catsSheet', '#depositSheet', '#depositsSheet', '#debtsSheet', '#drillSheet', '#profileSheet', '#sheet'];
 function topLayer(){ return LAYERS.find(sel => !$(sel).hidden) || null; }
 function closeTopLayer(){
   const top = topLayer();
@@ -2757,7 +2798,7 @@ function closeTopLayer(){
     '#depositSheet': closeDeposit, '#depositsSheet': closeDepositsSheet,
     '#accountModal': closeAccountModal, '#catEditModal': closeCatEdit, '#accountSheet': closeAccount, '#accountsSheet': closeAccountsSheet, '#catsSheet': closeCatsSheet,
     '#photoModal': () => { $('#photoModal').hidden = true; }, '#catPdfModal': () => { $('#catPdfModal').hidden = true; }, '#tripModal': () => { $('#tripModal').hidden = true; },
-    '#tripsSheet': () => closeLayer('#tripsSheet'),
+    '#tripsSheet': () => closeLayer('#tripsSheet'), '#guidePage': () => closeGuide(),
     '#shopSheet': () => closeLayer('#shopSheet'), '#planSheet': () => closeLayer('#planSheet'), '#calendarSheet': () => closeLayer('#calendarSheet'),
     '#auditSheet': () => closeLayer('#auditSheet'), '#trashSheet': () => closeLayer('#trashSheet'),
     '#profileSheet': () => closeProfile(), '#sheet': () => closeSheet(), '#confirmModal': () => $('#confirmCancel').click()})[top]?.();

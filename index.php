@@ -460,6 +460,10 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
         <i class="balance-dot" id="profileDot">₸</i>
         <div><div class="balance-name" id="profileName">—</div><div class="balance-sub">Семейный бюджет · доступ через Telegram</div></div>
       </div>
+      <button type="button" class="guide-open" id="guideOpen">
+        <span class="pf-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .8-1 1.5v.7M12 17h.01"/></svg></span>
+        <span class="pf-sum"><b>Гид</b><small>Вопросы и ответы по приложению</small></span><i class="pf-chev side" aria-hidden="true"></i>
+      </button>
       <div class="pf-grid">
         <button type="button" class="pf-tile" id="categoriesOpen"><span class="pf-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12V4h8l9 9-8 8-9-9zM7.5 7.5h.01"/></svg></span><b>Категории</b></button>
         <button type="button" class="pf-tile" id="auditOpen"><span class="pf-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v4l3 2M3.5 12a8.5 8.5 0 1 0 2.5-6M3 4v4h4"/></svg></span><b>Журнал</b></button>
@@ -1002,6 +1006,8 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
     </div>
   </div>
 </div>
+
+<?php define('FAMFIN_GUIDE', true); require __DIR__ . '/guide.inc.php'; ?>
 
 <script>window.BOT_USERNAME=<?= json_encode($botUser) ?>;window.LOCAL_DEV=<?= json_encode($localDev) ?>;</script>
 <script src="app.js?v=<?= filemtime(__DIR__ . '/app.js') ?>"></script>
