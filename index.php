@@ -420,6 +420,7 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       </div>
 
       <div id="limitsForm" class="limit-form"><div class="loading-placeholder"><div class="spinner"></div></div></div>
+      <button type="button" class="custom-cat-btn" id="limitsAddCat">+ Новая категория</button>
 
       <h3 class="profile-section-title">Настройки лимитов</h3>
       <label class="switch-row">

@@ -18,6 +18,8 @@ function features_schema(PDO $pdo): void {
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_transfers_date ON transfers(occurred_on);");
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_goal_moves_goal ON goal_moves(goal_id);");
     statement_jobs_schema($pdo);
+    adjustments_schema($pdo);
+    $pdo->exec("CREATE TABLE IF NOT EXISTS custom_categories(name TEXT PRIMARY KEY,grp TEXT NOT NULL DEFAULT 'variable',created_by INTEGER NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);");
     return;
   }
   $cs = 'DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci';
@@ -32,6 +34,34 @@ function features_schema(PDO $pdo): void {
     $pdo->exec("CREATE INDEX transactions_import_key_idx ON transactions(import_key)");
   }
   statement_jobs_schema($pdo);
+  adjustments_schema($pdo);
+  $pdo->exec("CREATE TABLE IF NOT EXISTS custom_categories(name VARCHAR(80) PRIMARY KEY,grp VARCHAR(16) NOT NULL DEFAULT 'variable',created_by BIGINT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+}
+
+/* ========== CUSTOM CATEGORIES ========== */
+// Created from the entry form or the limits screen; available everywhere right away
+function custom_categories(): array {
+  $out = [];
+  foreach (db()->query('SELECT name,grp FROM custom_categories ORDER BY created_at,name') as $r) $out[(string)$r['name']] = $r['grp'] === 'fixed' ? 'fixed' : 'variable';
+  return $out;
+}
+
+function add_custom_category(string $name, string $group, array $member): void {
+  $name = trim(preg_replace('/\s+/u', ' ', $name));
+  if ($name === '' || mb_strlen($name) > 80) throw new RuntimeException('Название категории — от 1 до 80 символов');
+  if (in_array(mb_strtolower($name), ['*', 'пополнение', 'возврат', 'со своих счетов', 'зарплата'], true)) throw new RuntimeException('Это название занято');
+  $group = $group === 'fixed' ? 'fixed' : 'variable';
+  $sql = is_sqlite()
+    ? 'INSERT INTO custom_categories(name,grp,created_by) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET grp=excluded.grp'
+    : 'INSERT INTO custom_categories(name,grp,created_by) VALUES(?,?,?) ON DUPLICATE KEY UPDATE grp=VALUES(grp)';
+  db()->prepare($sql)->execute([$name, $group, $member['id']]);
+}
+
+// Lists for the category grid in the app: config defaults plus custom and used expense categories
+function category_groups_all(): array {
+  $out = ['fixed' => [], 'variable' => []];
+  foreach (category_groups_map() as $name => $g) $out[$g === 'fixed' ? 'fixed' : 'variable'][] = (string)$name;
+  return $out;
 }
 
 function mark_balance_changed(): void { set_setting('balance_widget_dirty', '1'); }
@@ -394,6 +424,7 @@ function search_operations(string $query, int $limit = 100): array {
 // Parses text of a Kaspi Gold statement ("01.10.26  - 3 450,00 ₸  Покупка  MAGNUM ...").
 // Purchases are pre-selected; transfers, top-ups, withdrawals and duplicates are offered unticked.
 function parse_bank_statement(string $text, int $payerId): array {
+  $meta = parse_statement_meta($text);
   $text = str_replace(["\u{00A0}", "\u{2009}", "\u{202F}", "\r"], [' ', ' ', ' ', ''], $text);
   $re = '/(\d{2})\.(\d{2})\.(\d{2}|\d{4})\s+([+\-−–])\s*(\d[\d ]*(?:[.,]\d{1,2})?)\s*(?:₸|т\b|тг|KZT)?\s+(Покупк[аи]|Пополнени[ея]|Поступлени[ея]|Перевод[ы]?|Сняти[ея]|Разное|Плат[её]ж[и]?|Оплата)\s*([^\n]*)/u';
   preg_match_all($re, $text, $m, PREG_SET_ORDER);
@@ -409,10 +440,21 @@ function parse_bank_statement(string $text, int $payerId): array {
     $details = trim(preg_replace('/\s{2,}/u', ' ', $x[7]));
     $kind = $sign === '+' ? 'topup' : 'expense';
     $isPurchase = str_starts_with($type, 'покупк') || str_starts_with($type, 'плат') || str_starts_with($type, 'оплат');
-    $category = $kind === 'topup' ? 'Пополнение' : (categorize_text($details) ?? 'Другое');
+    // Incoming money: top-ups, own-account inflows, incoming transfers, purchase refunds
+    $incoming = $kind === 'topup';
+    $owner = null;
+    if ($incoming) {
+      $category = $isPurchase ? 'Возврат' : (str_starts_with($type, 'поступлени') ? 'Со своих счетов' : 'Пополнение');
+      // "Перевод от Томирис М." is the other member's contribution, not the card holder's
+      $owner = member_in_text($details, $payerId);
+    } else {
+      $category = categorize_text($details) ?? 'Другое';
+    }
+    $main = ($isPurchase && $kind === 'expense') || $incoming;
     $rows[] = ['date' => $date, 'kind' => $kind, 'amount' => $amount, 'type' => $x[6], 'note' => mb_substr($details, 0, 200),
       'category' => $category, 'group' => category_group_of($category), 'purchase' => $isPurchase && $kind === 'expense',
-      'include' => $isPurchase && $kind === 'expense', 'duplicate' => false, 'dup' => null];
+      'incoming' => $incoming, 'main' => $main, 'payer_id' => $owner, 'account' => $meta['account'],
+      'include' => $main, 'duplicate' => false, 'dup' => null];
   }
   return mark_statement_duplicates(statement_keys($rows), $payerId);
 }
@@ -457,16 +499,20 @@ function mark_statement_duplicates(array $rows, int $payerId): array {
   $rows = statement_keys($rows);
   $dates = array_column($rows, 'date');
   $known = existing_import_keys(array_column($rows, 'key'));
-  $pool = manual_matches($payerId, min($dates), max($dates));
+  $pools = [];
   foreach ($rows as &$row) {
+    $owner = (int)($row['payer_id'] ?? 0) ?: $payerId;
+    $pools[$owner] ??= manual_matches($owner, min($dates), max($dates));
+    $pool = &$pools[$owner];
     $row['dup'] = null;
     if (isset($known[$row['key']])) $row['dup'] = 'imported';
     else {
       $k = $row['date'] . '|' . $row['kind'] . '|' . number_format((float)$row['amount'], 2, '.', '');
       if (!empty($pool[$k])) { array_shift($pool[$k]); $row['dup'] = 'manual'; }
     }
+    unset($pool);
     $row['duplicate'] = $row['dup'] !== null;
-    $row['include'] = !empty($row['purchase']) && !$row['duplicate'];
+    $row['include'] = (!empty($row['main']) || !empty($row['purchase'])) && !$row['duplicate'];
   }
   unset($row);
   return $rows;
@@ -481,7 +527,10 @@ function import_rows(array $rows, int $payerId): array {
   $rows = statement_keys(array_values(array_filter($rows, 'is_array')));
   $entries = [];
   foreach ($rows as $i => $r) {
-    try { $entries[] = validate_entry($r) + ['key' => $r['key']]; }
+    try {
+      $owner = (int)($r['payer_id'] ?? 0);
+      $entries[] = validate_entry($r) + ['key' => $r['key'], 'owner' => is_member_id($owner) ? $owner : $payerId, 'account' => (string)($r['account'] ?? '')];
+    }
     catch (RuntimeException $e) { throw new RuntimeException('Строка ' . ($i + 1) . ': ' . $e->getMessage()); }
   }
   $result = ['ids' => [], 'linked' => [], 'skipped' => 0];
@@ -491,18 +540,19 @@ function import_rows(array $rows, int $payerId): array {
   try {
     $known = existing_import_keys(array_column($entries, 'key'));
     $dates = array_column($entries, 'date');
-    $pool = manual_matches($payerId, min($dates), max($dates));
-    $insert = $pdo->prepare('INSERT INTO transactions(telegram_id,kind,amount,category,category_group,note,occurred_on,import_key) VALUES(?,?,?,?,?,?,?,?)');
-    $link = $pdo->prepare('UPDATE transactions SET import_key=? WHERE id=? AND import_key IS NULL');
+    $pools = [];
+    $insert = $pdo->prepare('INSERT INTO transactions(telegram_id,kind,amount,category,category_group,note,occurred_on,import_key,import_account) VALUES(?,?,?,?,?,?,?,?,?)');
+    $link = $pdo->prepare('UPDATE transactions SET import_key=?,import_account=? WHERE id=? AND import_key IS NULL');
     foreach ($entries as $e) {
       if (isset($known[$e['key']])) { $result['skipped']++; continue; }
+      $pools[$e['owner']] ??= manual_matches($e['owner'], min($dates), max($dates));
       $k = $e['date'] . '|' . $e['kind'] . '|' . number_format((float)$e['amount'], 2, '.', '');
-      if (!empty($pool[$k])) {
-        $id = array_shift($pool[$k]);
-        $link->execute([$e['key'], $id]);
+      if (!empty($pools[$e['owner']][$k])) {
+        $id = array_shift($pools[$e['owner']][$k]);
+        $link->execute([$e['key'], $e['account'] ?: null, $id]);
         $result['linked'][] = $id;
       } else {
-        $insert->execute([$payerId, $e['kind'], $e['amount'], $e['category'], $e['group'], $e['note'], $e['date'], $e['key']]);
+        $insert->execute([$e['owner'], $e['kind'], $e['amount'], $e['category'], $e['group'], $e['note'], $e['date'], $e['key'], $e['account'] ?: null]);
         $result['ids'][] = (int)$pdo->lastInsertId();
       }
       $known[$e['key']] = true;
@@ -517,7 +567,7 @@ function import_rows(array $rows, int $payerId): array {
 function undo_import(array $ids, array $linked): int {
   $n = 0;
   foreach ($ids as $id) if (delete_transaction((int)$id)) $n++;
-  $q = db()->prepare('UPDATE transactions SET import_key=NULL WHERE id=?');
+  $q = db()->prepare('UPDATE transactions SET import_key=NULL,import_account=NULL WHERE id=?');
   foreach ($linked as $id) $q->execute([(int)$id]);
   return $n;
 }
@@ -635,7 +685,7 @@ function telegram_download(string $fileId, string $dest): void {
   if (!$ok) throw new RuntimeException('Не удалось скачать файл: ' . $err);
 }
 
-function statement_summary(array $rows, int $payerId, string $fileName = ''): string {
+function statement_summary(array $rows, int $payerId, string $fileName = '', array $meta = []): string {
   $dates = array_column($rows, 'date');
   $buy = array_filter($rows, fn($r) => $r['purchase'] && !$r['duplicate']);
   $other = array_filter($rows, fn($r) => !$r['purchase'] && !$r['duplicate']);
@@ -647,19 +697,36 @@ function statement_summary(array $rows, int $payerId, string $fileName = ''): st
   $fmt = fn($iso) => (new DateTimeImmutable($iso))->format('d.m.Y');
   $lines = ['📄 Выписка' . ($fileName !== '' ? " «{$fileName}»" : '') . ' · ' . $fmt(min($dates)) . ' — ' . $fmt(max($dates)), '👤 Чья: ' . user_label($payerId), '', 'Найдено операций: ' . count($rows)];
   $lines[] = '🛒 Новые покупки: ' . count($buy) . ($sum ? ' на ' . fmt_money($sum) : '');
-  foreach (statement_scopes($rows) as $sc) if ($sc['key'] !== 'all' && $sc['buy']) $lines[] = '   ' . mb_strtoupper(mb_substr($sc['label'], 0, 1)) . mb_substr($sc['label'], 1) . ': ' . $sc['buy'] . ' на ' . fmt_money($sc['buy_sum']);
+  foreach (statement_scopes($rows) as $sc) {
+    if ($sc['key'] === 'all' || !$sc['buy']) continue;
+    $parts = [];
+    if ($sc['spend']) $parts[] = 'покупки ' . fmt_money($sc['spend']);
+    if ($sc['income']) $parts[] = 'пополнения ' . fmt_money($sc['income']);
+    $lines[] = '   ' . mb_strtoupper(mb_substr($sc['label'], 0, 1)) . mb_substr($sc['label'], 1) . ': ' . $sc['buy'] . ' оп. — ' . implode(', ', $parts);
+  }
   $i = 0;
   foreach ($byCat as $cat => $v) { $lines[] = '   · ' . $cat . ' — ' . fmt_money($v); if (++$i >= 8) break; }
   $unknown = count(array_filter($buy, fn($r) => $r['category'] === 'Другое'));
   if ($unknown) $lines[] = "   ($unknown без категории — попадут в «Другое», можно поправить в приложении)";
-  if ($other) $lines[] = '↔️ Переводы, пополнения, снятия: ' . count($other) . ' — по умолчанию не импортирую';
+  $in = array_filter($rows, fn($r) => !empty($r['incoming']) && !$r['duplicate']);
+  if ($in) {
+    $lines[] = '💰 Новые пополнения: ' . count($in) . ' на ' . fmt_money(array_sum(array_column($in, 'amount')));
+    $byOwner = [];
+    foreach ($in as $r) if (!empty($r['payer_id'])) $byOwner[(int)$r['payer_id']] = ($byOwner[(int)$r['payer_id']] ?? 0) + $r['amount'];
+    foreach ($byOwner as $id => $v) $lines[] = '   · от ' . user_label($id) . ' — ' . fmt_money($v) . ' (запишу как её/его пополнение)';
+  }
+  $out = array_filter($rows, fn($r) => empty($r['main']) && empty($r['purchase']) && !$r['duplicate']);
+  if ($out) $lines[] = '↔️ Переводы, снятия, комиссии: ' . count($out) . ' — по умолчанию не импортирую';
+  if (!empty($meta['available'])) {
+    $lines[] = '🏦 В банке на ' . (new DateTimeImmutable($meta['available']['date']))->format('d.m.Y') . ': ' . fmt_money_exact($meta['available']['amount']) . ($meta['account'] ? ' · ' . $meta['account'] : '');
+  }
   $prev = count(array_filter($dups, fn($r) => ($r['dup'] ?? '') === 'imported'));
   $manual = count($dups) - $prev;
   if ($prev) $lines[] = '♻️ Уже импортированы раньше: ' . $prev . ' — пропущу';
   if ($manual) $lines[] = '✋ Уже записаны вручную (та же дата и сумма): ' . $manual . ' — не задвою, только отмечу источник';
   if ((new DateTimeImmutable(min($dates)))->diff(new DateTimeImmutable(max($dates)))->days > 62) {
     $lines[] = '';
-    $lines[] = '⚠️ Выписка за большой период. Покупки уменьшают общий остаток, поэтому за прошлые месяцы импортируйте их, только если внесли и пополнения за те же месяцы. Для начала учёта обычно хватает текущего месяца.';
+    $lines[] = '⚠️ Выписка за большой период. После импорта нажмите «Сверить с банком» — остаток по карте в бюджете станет таким же, как в банке.';
   }
   return implode("\n", $lines);
 }
@@ -672,35 +739,37 @@ function statement_scopes(array $rows): array {
   $out = [];
   foreach ([['month', $month, 'за ' . $months[(int)date('n') - 1]], ['3m', $three, 'за 3 месяца'], ['all', '0000-00-00', 'за весь период']] as [$key, $from, $label]) {
     $in = array_filter($rows, fn($r) => !$r['duplicate'] && $r['date'] >= $from);
-    $buy = array_filter($in, fn($r) => $r['purchase']);
+    $buy = array_filter($in, fn($r) => !empty($r['main']) || $r['purchase']);
     $out[] = ['key' => $key, 'from' => $from, 'label' => $label, 'buy' => count($buy),
-      'buy_sum' => array_sum(array_column($buy, 'amount')), 'all' => count($in)];
+      'spend' => array_sum(array_map(fn($r) => $r['kind'] === 'expense' ? $r['amount'] : 0, $buy)),
+      'income' => array_sum(array_map(fn($r) => $r['kind'] === 'topup' ? $r['amount'] : 0, $buy)), 'all' => count($in)];
   }
   return $out;
 }
 
-function statement_markup(int $userId, int $jobId, array $rows, int $payerId): array {
+function statement_markup(int $userId, int $jobId, array $rows, int $payerId, array $meta = []): array {
   $labels = []; $opts = []; $seen = [];
   foreach (statement_scopes($rows) as $sc) {
     // Skip a wider window that adds nothing over the narrower one
     if (!$sc['buy'] || in_array($sc['buy'], $seen, true)) continue;
     $seen[] = $sc['buy'];
-    $labels[] = ($sc['key'] === 'month' ? '✅ ' : '') . "Покупки {$sc['label']} — {$sc['buy']}";
+    $labels[] = ($sc['key'] === 'month' ? '✅ ' : '') . "Покупки и пополнения {$sc['label']} — {$sc['buy']}";
     $opts[] = 'buy:' . $sc['key'];
   }
   $month = statement_scopes($rows)[0];
   if ($month['all'] > $month['buy']) { $labels[] = "➕ Всё новое {$month['label']} — {$month['all']}"; $opts[] = 'all:month'; }
+  if (!empty($meta['available']) && !empty($meta['account'])) { $labels[] = '⚖️ Сверить остаток с банком'; $opts[] = 'reconcile'; }
   $labels[] = '📋 Список'; $opts[] = 'list';
   foreach (allowed_members_map() as $id => $name) if ($id !== $payerId) { $labels[] = "👤 Это выписка: $name"; $opts[] = 'payer:' . $id; }
   $labels[] = '✖️ Отмена'; $opts[] = 'cancel';
-  return bot_keyboard($userId, ['type' => 'statement', 'job' => $jobId, 'payer' => $payerId, 'rows' => $rows, 'opts' => $opts], $labels, 1);
+  return bot_keyboard($userId, ['type' => 'statement', 'job' => $jobId, 'payer' => $payerId, 'rows' => $rows, 'meta' => $meta, 'opts' => $opts], $labels, 1);
 }
 
 function statement_list_messages(array $rows): array {
   $out = []; $buf = '';
   foreach ($rows as $r) {
     $d = (new DateTimeImmutable($r['date']))->format('d.m');
-    $mark = ($r['dup'] ?? null) === 'imported' ? '♻️' : (($r['dup'] ?? null) === 'manual' ? '✋' : ($r['purchase'] ? '🛒' : '↔️'));
+    $mark = ($r['dup'] ?? null) === 'imported' ? '♻️' : (($r['dup'] ?? null) === 'manual' ? '✋' : ($r['purchase'] ? '🛒' : (!empty($r['incoming']) ? '💰' : '↔️')));
     $line = "$mark $d " . ($r['kind'] === 'expense' ? '−' : '+') . number_format($r['amount'], 0, ',', ' ') . " · {$r['category']} · " . mb_substr($r['note'] ?: $r['type'], 0, 40) . "\n";
     if (mb_strlen($buf . $line) > 3800) { $out[] = $buf; $buf = ''; }
     $buf .= $line;
@@ -718,8 +787,9 @@ function process_statement_job(array $job): void {
     $text = $head === '%PDF-' ? pdf_to_text($tmp) : (string)file_get_contents($tmp);
     $rows = parse_bank_statement($text, (int)$job['telegram_id']);
     if (!$rows) throw new RuntimeException('Не нашёл в файле операций. Нужна выписка Kaspi Gold в PDF (Kaspi → Kaspi Gold → Выписка).');
-    $payload = ['chat_id' => (int)$job['chat_id'], 'text' => statement_summary($rows, (int)$job['telegram_id'], $job['file_name']),
-      'reply_markup' => statement_markup((int)$job['telegram_id'], (int)$job['id'], $rows, (int)$job['telegram_id'])];
+    $meta = parse_statement_meta($text);
+    $payload = ['chat_id' => (int)$job['chat_id'], 'text' => statement_summary($rows, (int)$job['telegram_id'], $job['file_name'], $meta),
+      'reply_markup' => statement_markup((int)$job['telegram_id'], (int)$job['id'], $rows, (int)$job['telegram_id'], $meta)];
     if ($job['message_id']) telegram('editMessageText', $payload + ['message_id' => (int)$job['message_id']]);
     else telegram('sendMessage', $payload);
     db()->prepare("UPDATE statement_jobs SET status='done' WHERE id=?")->execute([$job['id']]);
@@ -733,4 +803,98 @@ function process_statement_job(array $job): void {
   } finally {
     @unlink($tmp);
   }
+}
+
+/* ========== BANK RECONCILIATION ========== */
+// Imported operations remember their account ("Kaspi Gold *5052"). Reconciliation adds a
+// balance adjustment so that the money of that account in the budget equals the bank's
+// "Доступно на ..." figure. Adjustments change balances only, never income/expense reports.
+
+function adjustments_schema(PDO $pdo): void {
+  if (is_sqlite()) {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS balance_adjustments(id INTEGER PRIMARY KEY AUTOINCREMENT,telegram_id INTEGER NOT NULL,account TEXT NOT NULL DEFAULT '',amount NUMERIC NOT NULL,occurred_on TEXT NOT NULL,note TEXT NOT NULL DEFAULT '',created_by INTEGER NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);");
+    if (!has_column($pdo, 'transactions', 'import_account')) $pdo->exec("ALTER TABLE transactions ADD COLUMN import_account TEXT NULL;");
+    return;
+  }
+  $pdo->exec("CREATE TABLE IF NOT EXISTS balance_adjustments(id BIGINT AUTO_INCREMENT PRIMARY KEY,telegram_id BIGINT NOT NULL,account VARCHAR(80) NOT NULL DEFAULT '',amount DECIMAL(14,2) NOT NULL,occurred_on DATE NOT NULL,note VARCHAR(300) NOT NULL DEFAULT '',created_by BIGINT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+  if (!has_column($pdo, 'transactions', 'import_account')) $pdo->exec("ALTER TABLE transactions ADD COLUMN import_account VARCHAR(80) NULL");
+}
+
+// Account id and the bank's available balance from the statement header
+function parse_statement_meta(string $text): array {
+  $text = str_replace(["\u{00A0}", "\u{2009}", "\u{202F}"], ' ', $text);
+  $account = '';
+  if (preg_match('/Номер карты:\s*(\*\d{4})/u', $text, $m)) $account = 'Kaspi Gold ' . $m[1];
+  elseif (preg_match('/Номер счета:\s*(KZ\w{4,})/u', $text, $m)) $account = 'Kaspi ' . substr($m[1], -4);
+  $available = null;
+  if (preg_match_all('/Доступно на (\d{2})\.(\d{2})\.(\d{2,4}):?\s+([+\-−])\s*(\d[\d ]*,\d{2})/u', $text, $mm, PREG_SET_ORDER)) {
+    foreach ($mm as $x) {
+      $date = (strlen($x[3]) === 2 ? '20' . $x[3] : $x[3]) . "-{$x[2]}-{$x[1]}";
+      $amount = (float)str_replace([' ', ','], ['', '.'], $x[5]) * ($x[4] === '+' ? 1 : -1);
+      if (!$available || $date > $available['date']) $available = ['date' => $date, 'amount' => $amount];
+    }
+  }
+  return ['account' => $account, 'available' => $available];
+}
+
+// Family member named in the details of an incoming operation ("Томирис М.")
+function member_in_text(string $details, int $exceptId): ?int {
+  global $config;
+  $t = mb_strtolower($details);
+  foreach ($config['allowed_users'] as $id) {
+    if ($id === $exceptId) continue;
+    $names = array_merge([user_label($id)], (array)($config['member_aliases'][$id] ?? []));
+    foreach ($names as $name) {
+      $first = mb_strtolower(trim(explode(' ', (string)$name)[0]));
+      if (mb_strlen($first) >= 3 && preg_match('/(^|[^\p{L}])' . preg_quote($first, '/') . '([^\p{L}]|$)/u', $t)) return $id;
+    }
+  }
+  return null;
+}
+
+function adjustments_until(string $until): array {
+  $q = db()->prepare('SELECT telegram_id,SUM(amount) total FROM balance_adjustments WHERE occurred_on<? GROUP BY telegram_id');
+  $q->execute([$until]);
+  $out = [];
+  foreach ($q as $r) $out[(int)$r['telegram_id']] = (float)$r['total'];
+  return $out;
+}
+
+// Money of one bank account in the budget up to a date (inclusive)
+function account_net(string $account, string $date): float {
+  $q = db()->prepare("SELECT COALESCE(SUM(CASE WHEN kind='topup' THEN amount ELSE -amount END),0) FROM transactions WHERE import_account=? AND occurred_on<=?");
+  $q->execute([$account, $date]);
+  $net = (float)$q->fetchColumn();
+  $q = db()->prepare('SELECT COALESCE(SUM(amount),0) FROM balance_adjustments WHERE account=? AND occurred_on<=?');
+  $q->execute([$account, $date]);
+  return $net + (float)$q->fetchColumn();
+}
+
+function reconcile_account(string $account, int $holderId, string $date, float $bankAmount, int $createdBy): array {
+  if ($account === '') throw new RuntimeException('В выписке не нашёл номер карты — сверить не с чем');
+  $before = account_net($account, $date);
+  $diff = round($bankAmount - $before, 2);
+  if (abs($diff) < 0.01) return ['id' => null, 'diff' => 0.0, 'before' => $before];
+  $note = 'Сверка с банком: ' . $account . ', доступно ' . fmt_money_exact($bankAmount) . ' на ' . (new DateTimeImmutable($date))->format('d.m.Y');
+  db()->prepare('INSERT INTO balance_adjustments(telegram_id,account,amount,occurred_on,note,created_by) VALUES(?,?,?,?,?,?)')
+    ->execute([$holderId, $account, $diff, $date, $note, $createdBy]);
+  mark_balance_changed();
+  return ['id' => (int)db()->lastInsertId(), 'diff' => $diff, 'before' => $before];
+}
+
+function delete_adjustment(int $id): void {
+  db()->prepare('DELETE FROM balance_adjustments WHERE id=?')->execute([$id]);
+  mark_balance_changed();
+}
+
+function fmt_money_exact(float $v): string {
+  return (abs($v - round($v)) < 0.005 ? number_format($v, 0, ',', ' ') : number_format($v, 2, ',', ' ')) . ' ' . currency_symbol();
+}
+
+function reconcile_report(array $r, string $account, float $bankAmount, string $date): string {
+  $d = (new DateTimeImmutable($date))->format('d.m.Y');
+  if ($r['id'] === null) return "⚖️ $account: в бюджете уже ровно " . fmt_money_exact($bankAmount) . " на $d — корректировка не нужна.";
+  return "⚖️ Сверено с банком · $account\nВ банке на $d: " . fmt_money_exact($bankAmount) . "\nВ бюджете было: " . fmt_money_exact($r['before']) .
+    "\nКорректировка остатка: " . ($r['diff'] > 0 ? '+' : '−') . fmt_money_exact(abs($r['diff'])) .
+    "\n\nКорректировка меняет только остаток — в отчётах о доходах и расходах её нет.";
 }

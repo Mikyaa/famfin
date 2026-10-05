@@ -279,18 +279,22 @@ function balances_until(string $untilExclusive): array {
   // Transfers move money between members; goal savings leave the available balance
   $transfers = transfer_effects_until($untilExclusive);
   $saved = goal_moves_until($untilExclusive);
-  $totalSaved = 0.0;
+  // Bank reconciliation corrections: balance only, not income or spending
+  $adjust = adjustments_until($untilExclusive);
+  $totalSaved = 0.0; $totalAdjust = 0.0;
   foreach ($per as &$p) {
     $p['transfers'] = $transfers[$p['id']] ?? 0.0;
     $p['saved'] = $saved[$p['id']] ?? 0.0;
+    $p['adjustment'] = $adjust[$p['id']] ?? 0.0;
     $totalSaved += $p['saved'];
-    $p['balance'] = $p['topups'] - $p['expenses'] + $p['transfers'] - $p['saved'];
+    $totalAdjust += $p['adjustment'];
+    $p['balance'] = $p['topups'] - $p['expenses'] + $p['transfers'] - $p['saved'] + $p['adjustment'];
   }
   unset($p);
   return [
     'currency' => $config['currency'],
     'until' => (new DateTimeImmutable($untilExclusive))->modify('-1 day')->format('Y-m-d'),
-    'shared' => ['topups'=>$totalTop, 'expenses'=>$totalExp, 'saved'=>$totalSaved, 'balance'=>$totalTop - $totalExp - $totalSaved],
+    'shared' => ['topups'=>$totalTop, 'expenses'=>$totalExp, 'saved'=>$totalSaved, 'adjustment'=>$totalAdjust, 'balance'=>$totalTop - $totalExp - $totalSaved + $totalAdjust],
     'members' => array_values($per),
   ];
 }
@@ -592,11 +596,13 @@ function limit_rows(int $memberId): array {
   return $q->fetchAll();
 }
 
+// Expense categories: defaults from config, the family's own ones, then any used in expenses
 function category_groups_map(): array {
   global $config;
   $map = [];
   foreach (['fixed', 'variable'] as $g) foreach ($config['category_groups'][$g] ?? [] as $c) $map[$c] = $g;
-  foreach (db()->query("SELECT category,MAX(COALESCE(category_group,'')) cg FROM transactions GROUP BY category") as $r) {
+  foreach (custom_categories() as $name => $g) if (!isset($map[$name])) $map[$name] = $g;
+  foreach (db()->query("SELECT category,MAX(COALESCE(category_group,'')) cg FROM transactions WHERE kind='expense' GROUP BY category") as $r) {
     if (!isset($map[$r['category']])) $map[(string)$r['category']] = category_group_of((string)$r['category'], $r['cg'] ?: null);
   }
   return $map;

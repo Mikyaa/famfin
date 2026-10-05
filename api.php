@@ -36,8 +36,14 @@ try {
       'recurring' => recurring_list(),
       'members' => array_map(fn($id, $name) => ['id' => $id, 'name' => $name], array_keys(allowed_members_map()), allowed_members_map()),
       'limits' => limits_status((int)$member['id']),
-      'category_groups' => $config['category_groups'] ?? ['fixed'=>[],'variable'=>[]],
+      'category_groups' => category_groups_all(),
     ]);
+  }
+
+  if ($method === 'POST' && $action === 'category_add') {
+    $d = body();
+    add_custom_category((string)($d['name'] ?? ''), (string)($d['group'] ?? 'variable'), $member);
+    json_out(['ok' => true, 'category_groups' => category_groups_all(), 'categories' => known_categories()]);
   }
 
   if ($method === 'GET' && $action === 'limits') {
@@ -82,7 +88,7 @@ try {
       'daily' => $daily,
       'transactions' => $rows,
       'pagination' => ['page'=>$page,'limit'=>$limit,'total'=>$total,'pages'=>(int)ceil($total / $limit)],
-      'category_groups' => $config['category_groups'] ?? ['fixed'=>[],'variable'=>[]],
+      'category_groups' => category_groups_all(),
     ]);
   }
 

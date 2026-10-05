@@ -443,7 +443,7 @@ function bindSheet(){
     updateLimitHint();
   });
 
-  $('#customCatBtn').onclick = openCustomCatModal;
+  $('#customCatBtn').onclick = () => openCustomCatModal('sheet');
   $('#submitBtn').onclick = submitEntry;
   $('#sheetDelete').onclick = async () => {
     if (!sheetState.editId) return;
@@ -477,7 +477,9 @@ $('#calCancel').onclick = closeSheetCalendar;
 
 /* ========== CUSTOM CATEGORY ========== */
 let customGroup = 'variable';
-function openCustomCatModal(){
+let customCatTarget = 'sheet'; // 'sheet' picks the new category for the entry, 'profile' adds a limit row
+function openCustomCatModal(target = 'sheet'){
+  customCatTarget = target === 'profile' ? 'profile' : 'sheet';
   $('#customCatName').value = '';
   customGroup = 'variable';
   $$('#customCatGroup button').forEach(b => b.classList.toggle('selected', b.dataset.group === 'variable'));
@@ -490,17 +492,34 @@ $$('#customCatGroup button').forEach(b => b.onclick = () => {
   customGroup = b.dataset.group;
   $$('#customCatGroup button').forEach(x => x.classList.toggle('selected', x === b));
 });
-$('#customCatSave').onclick = () => {
-  const name = $('#customCatName').value.trim();
+// Saved on the server right away, so it shows up in limits, recurring payments and the bot
+$('#customCatSave').onclick = async () => {
+  const name = $('#customCatName').value.trim().replace(/\s+/g, ' ');
   if (!name) { notice('Введите название'); return; }
   if (name.length > 80) { notice('Слишком длинное название'); return; }
   const group = customGroup;
-  if (!categoryGroups[group]) categoryGroups[group] = [];
-  if (!categoryGroups[group].includes(name)) categoryGroups[group].push(name);
-  sheetState.category = name;
-  sheetState.group = group;
-  renderCatGrid();
-  closeCustomCatModal();
+  const btn = $('#customCatSave');
+  btn.disabled = true;
+  try {
+    const d = await request('api.php?action=category_add', {method: 'POST', body: JSON.stringify({name, group})});
+    categoryGroups = d.category_groups || categoryGroups;
+    recurringCategories = d.categories || recurringCategories;
+    if (mainCache) mainCache.category_groups = categoryGroups;
+    haptic('success');
+    if (customCatTarget === 'profile' && profile) {
+      ['fixed', 'variable'].forEach(g => { profile.groups[g] = profile.groups[g].filter(n => n !== name); });
+      profile.groups[group].push(name);
+      renderLimitRows();
+      setTimeout(() => $(`#limitsForm input[data-cat="${CSS.escape(name)}"]`)?.focus(), 50);
+      notice(`Категория «${name}» добавлена — задайте лимит`, true);
+    } else {
+      sheetState.category = name;
+      sheetState.group = group;
+      renderCatGrid();
+    }
+    closeCustomCatModal();
+  } catch(e) { haptic('error'); notice(e.message); }
+  finally { btn.disabled = false; }
 };
 
 /* ========== SUBMIT ========== */
@@ -657,6 +676,7 @@ function renderPersonalBalances(container, b){
         <span>Потрачено: ${money(m.expenses)}</span>
         ${m.transfers ? `<span>Переводы: ${m.transfers > 0 ? '+' : '−'}${money(Math.abs(m.transfers))}</span>` : ''}
         ${m.saved > 0 ? `<span>В копилках: ${money(m.saved)}</span>` : ''}
+        ${m.adjustment ? `<span>Сверка с банком: ${m.adjustment > 0 ? '+' : '−'}${money(Math.abs(m.adjustment))}</span>` : ''}
       </div>
       <div class="balance-share">Вклад: ${contribPct.toFixed(0)}% от пополнений</div>
       <div class="bar"><i style="width:${Math.abs(m.balance)/maxAbs*100}%"></i></div>
@@ -1304,6 +1324,7 @@ async function closeProfile(force = false){
 $('#avatar').onclick = () => openProfile();
 $('#limitsEdit').onclick = () => openProfile();
 $('#limitsSave').onclick = saveProfile;
+$('#limitsAddCat').onclick = () => openCustomCatModal('profile');
 $$('#profileSheet [data-profile-close]').forEach(el => el.onclick = () => closeProfile());
 
 /* ========== FORECAST ========== */
@@ -1630,7 +1651,7 @@ function syncImportSummary(){
   $('#importConfirm').textContent = sel.length ? `Импортировать ${sel.length}` : 'Ничего не выбрано';
 }
 $('#importConfirm').onclick = async () => {
-  const rows = importRows.filter(r => r.include).map(r => ({kind: r.kind, amount: r.amount, category: r.category, note: r.note, date: r.date, key: r.key, type: r.type}));
+  const rows = importRows.filter(r => r.include).map(r => ({kind: r.kind, amount: r.amount, category: r.category, note: r.note, date: r.date, key: r.key, type: r.type, payer_id: r.payer_id, account: r.account}));
   const btn = $('#importConfirm'); btn.disabled = true;
   try {
     const d = await request('api.php?action=import', {method:'POST', body: JSON.stringify({rows, payer_id: importPayer})});
