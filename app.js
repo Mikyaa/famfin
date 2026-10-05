@@ -2635,7 +2635,8 @@ if (r.plan_left !== null) { const p = w.addText('По плану: ' + fmt(r.plan
 w.addSpacer();
 const u = w.addText('обновлено ' + r.updated); u.textColor = new Color('#6E7584'); u.font = Font.systemFont(10);
 w.refreshAfterDate = new Date(Date.now() + 30 * 60 * 1000);
-Script.setWidget(w); Script.complete();`;
+if (config.runsInWidget) Script.setWidget(w); else await w.presentSmall();
+Script.complete();`;
   try { await navigator.clipboard.writeText(code); notice('Код виджета скопирован ✓', true); }
   catch { notice('Не удалось скопировать — откройте профиль на сайте'); }
 };

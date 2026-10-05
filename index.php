@@ -553,9 +553,10 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
             </details>
             <details class="pf-sub"><summary>Остаток на экране «Домой»</summary>
               <ol class="siri-steps">
-                <li>Установите бесплатное приложение Scriptable.</li>
-                <li>Создайте скрипт и вставьте код (кнопка ниже).</li>
-                <li>Добавьте виджет Scriptable на экран и выберите этот скрипт.</li>
+                <li>Установите бесплатное приложение Scriptable, создайте скрипт «Бюджет» и вставьте код (кнопка ниже). Нажмите ▶ — появится превью.</li>
+                <li>Выйдите на экран «Домой», зажмите пустое место → «Изменить» → «Добавить виджет» → Scriptable → маленький размер.</li>
+                <li>Зажмите появившийся виджет → «Изменить виджет» → Script: «Бюджет».</li>
+                <li>Не нажимайте «Add to Home Screen» внутри Scriptable — это ярлык, а не виджет.</li>
               </ol>
               <button type="button" class="secondary-button small" id="widgetCopy">Скопировать код виджета</button>
             </details>
