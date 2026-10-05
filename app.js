@@ -720,6 +720,9 @@ async function loadMain(){
     renderForecast(d.forecast);
     renderPayments(d.recurring);
     renderGoals(d.goals);
+    renderDebts(d.debts);
+    renderDeposits(d.deposits);
+    renderResetStatus(d.reset);
     renderLimits(d.limits);
     showShell();
   } catch(e) {
@@ -869,17 +872,20 @@ function renderReport(d){
 
   const total = d.summary.expenses || 1;
   $('#groups').innerHTML = `
-    <div class="group-row fixed">
-      <div class="group-info"><span>Обязательные</span><strong>${money(d.summary.fixed)} ${c}</strong></div>
+    <button type="button" class="group-row fixed drillable" data-group="fixed">
+      <div class="group-info"><span>Обязательные</span><strong>${money(d.summary.fixed)} ${c} <i class="drill-arrow">›</i></strong></div>
       <div class="cat-track"><i style="width:${d.summary.fixed/total*100}%"></i></div>
       <div class="group-sub">${(d.summary.fixed/total*100).toFixed(0)}% от расходов периода</div>
-    </div>
-    <div class="group-row variable">
-      <div class="group-info"><span>Переменные</span><strong>${money(d.summary.variable)} ${c}</strong></div>
+    </button>
+    <button type="button" class="group-row variable drillable" data-group="variable">
+      <div class="group-info"><span>Переменные</span><strong>${money(d.summary.variable)} ${c} <i class="drill-arrow">›</i></strong></div>
       <div class="cat-track"><i style="width:${d.summary.variable/total*100}%"></i></div>
       <div class="group-sub">${(d.summary.variable/total*100).toFixed(0)}% от расходов периода</div>
-    </div>
+    </button>
   `;
+  // Drill into a group: its categories first, then operations by date
+  $$('#groups .drillable').forEach(b => b.onclick = () => openDrill({from: d.from, to: d.to, group: b.dataset.group,
+    title: (b.dataset.group === 'fixed' ? 'Обязательные' : 'Переменные') + ' · ' + periodRange().title}));
 
   renderPersonalBalances($('#reportBalances'), d.balances);
 
@@ -894,21 +900,24 @@ function renderReport(d){
       <div class="person-val">${money(m.expenses)} <small>${c}</small></div>
       <div class="person-meta">${m.count} записей · пополнения ${money(m.topups)}</div>
       <div class="person-meta">обяз. ${money(m.fixed)} · перем. ${money(m.variable)}</div>
-      ${topCats.length ? `<div class="person-cats">${topCats.map(([n,v])=>`<span class="chip">${safe(n)} <b>${money(v)}</b></span>`).join('')}</div>` : ''}
+      ${topCats.length ? `<div class="person-cats">${topCats.map(([n,v])=>`<button type="button" class="chip" data-cat="${safe(n)}">${safe(n)} <b>${money(v)}</b></button>`).join('')}</div>` : ''}
       <div class="bar"><i style="width:${m.expenses/maxMember*100}%"></i></div>
     </article>`;
   }).join('');
 
   const entries = Object.entries(d.summary.categories || {}).filter(([_,v]) => reportState.filter === 'all' || v.group === reportState.filter);
   const maxCat = Math.max(1, ...entries.map(x=>Number(x[1].total)));
-  $('#reportCategories').innerHTML = entries.length ? entries.map(([n,v]) => `<div class="category-row">
+  $('#reportCategories').innerHTML = entries.length ? entries.map(([n,v]) => `<button type="button" class="category-row drillable" data-cat="${safe(n)}" aria-label="${safe(n)}: показать операции">
     <div class="category-info">
       <span>${safe(n)} <i class="cat-badge ${v.group}">${v.group==='fixed'?'обяз':'перем'}</i></span>
-      <strong>${money(v.total)} ${c}</strong>
+      <strong>${money(v.total)} ${c} <i class="drill-arrow">›</i></strong>
     </div>
     <div class="cat-track"><i style="width:${v.total/maxCat*100}%"></i></div>
     <div class="cat-sub">${v.count} операций · ${(v.total/(d.summary.expenses||1)*100).toFixed(0)}% расходов</div>
-  </div>`).join('') : '<div class="empty">Нет категорий за период</div>';
+  </button>`).join('') : '<div class="empty">Нет категорий за период</div>';
+  // A category opens straight on its operations, grouped by date
+  const openCategory = name => openDrill({from: d.from, to: d.to, group: 'all', category: name, view: 'transactions', title: name + ' · ' + periodRange().title});
+  $$('#reportCategories .drillable, #reportMembers .chip[data-cat]').forEach(b => b.onclick = () => openCategory(b.dataset.cat));
 
   renderChart(d.daily, c);
   renderReportHistory(d.transactions, c);
@@ -1349,7 +1358,7 @@ function renderForecast(f){
     return;
   }
   el.innerHTML = `
-    <div class="forecast-top"><span>Прогноз на конец месяца</span><span>${f.days_left ? 'ещё ' + f.days_left + ' дн.' : 'последний день'}</span></div>
+    <div class="forecast-top"><span>Сколько потратим к концу месяца</span><span>${f.days_left ? 'ещё ' + f.days_left + ' дн.' : 'последний день'}</span></div>
     <div class="forecast-value">≈ ${money(f.projected)} <small>${c}</small></div>
     <div class="forecast-sub">Уже потрачено ${money(f.spent)} ${c}${f.pace ? ` · в среднем ${money(f.pace)} ${c} в день` : ''}${f.unpaid_recurring ? ` · впереди платежи на ${money(f.unpaid_recurring)} ${c}` : ''}</div>
     ${limitLine}
@@ -1661,6 +1670,178 @@ $('#importConfirm').onclick = async () => {
   } catch(e) { haptic('error'); notice(e.message); btn.disabled = false; }
 };
 
+/* ========== DEBTS ========== */
+// "Мне должны" is green with +, "Я должен" is red with −. Debts live beside the budget, not in it.
+let debtsCache = [];
+const debtSign = d => d.direction === 'owed_to_me' ? '+' : '−';
+const debtClass = d => d.direction === 'owed_to_me' ? 'money-pos' : 'money-neg';
+
+function renderDebts(debts){
+  debtsCache = debts || [];
+  const c = cur(currency);
+  const t = {owed_to_me: 0, i_owe: 0};
+  debtsCache.forEach(d => { if (!d.closed) t[d.direction] += d.amount; });
+  $('#debtOwedToMe').textContent = (t.owed_to_me ? '+' : '') + money(t.owed_to_me) + ' ' + c;
+  $('#debtIOwe').textContent = (t.i_owe ? '−' : '') + money(t.i_owe) + ' ' + c;
+  const open = debtsCache.filter(d => !d.closed);
+  $('#debtHint').textContent = open.length ? `${open.length} ${open.length === 1 ? 'запись' : open.length < 5 ? 'записи' : 'записей'} — нажмите, чтобы открыть` : 'Пока никого — нажмите «+ Добавить»';
+  if (!$('#debtsSheet').hidden) renderDebtsSheet();
+}
+
+function renderDebtsSheet(){
+  const c = cur(currency);
+  const open = debtsCache.filter(d => !d.closed);
+  const t = {owed_to_me: 0, i_owe: 0};
+  open.forEach(d => { t[d.direction] += d.amount; });
+  $('#debtTotals').innerHTML = `
+    <div><span>Мне должны</span><b class="money-pos">${t.owed_to_me ? '+' : ''}${money(t.owed_to_me)} ${c}</b></div>
+    <div><span>Я должен</span><b class="money-neg">${t.i_owe ? '−' : ''}${money(t.i_owe)} ${c}</b></div>`;
+  const group = (dir, title) => {
+    const rows = open.filter(d => d.direction === dir);
+    if (!rows.length) return '';
+    return `<div class="limit-group-title">${title}</div>` + rows.map(d => `
+      <button type="button" class="debt-row" data-debt="${d.id}">
+        <span class="debt-row-main"><b>${safe(d.person)}</b><small>${[d.note && safe(d.note), d.due_on && 'до ' + fmtDate(d.due_on)].filter(Boolean).join(' · ') || 'без комментария'}</small></span>
+        <b class="${debtClass(d)}">${debtSign(d)}${money(d.amount)} ${c}</b>
+      </button>`).join('');
+  };
+  $('#debtsList').innerHTML = open.length ? group('owed_to_me', 'Мне должны') + group('i_owe', 'Я должен') : '<div class="empty">Долгов нет</div>';
+  $$('#debtsList [data-debt]').forEach(b => b.onclick = () => openDebtModal(debtsCache.find(d => d.id === Number(b.dataset.debt))));
+}
+
+function openDebtsSheet(){
+  renderDebtsSheet();
+  const s = $('#debtsSheet'); s.hidden = false; s.classList.remove('closing');
+}
+const closeDebtsSheet = () => animateClose($('#debtsSheet'));
+
+let debtEditing = null, debtDir = 'owed_to_me';
+async function openDebtModal(debt = null, dir = 'owed_to_me'){
+  debtEditing = debt;
+  debtDir = debt ? debt.direction : dir;
+  const c = cur(currency);
+  $('#debtTitle').textContent = debt ? debt.person : 'Новый долг';
+  $('#debtPerson').value = debt ? debt.person : '';
+  $('#debtNote').value = debt ? debt.note : '';
+  $('#debtDue').value = debt?.due_on || '';
+  $('#debtAmount').value = '';
+  $('#debtAmountLabel').hidden = Boolean(debt);
+  $('#debtDelete').hidden = !debt;
+  $('#debtRepay').hidden = !debt;
+  $('#debtCurrent').hidden = !debt;
+  $('#debtMoveAmount').value = '';
+  $$('#debtDirection button').forEach(b => b.classList.toggle('selected', b.dataset.dir === debtDir));
+  if (debt) {
+    $('#debtCurrent').innerHTML = `<span>${debt.direction === 'owed_to_me' ? 'Должен(на) мне' : 'Я должен'}</span><b class="${debtClass(debt)}">${debtSign(debt)}${money(debt.amount)} ${c}</b>`;
+    $('#debtRepayBtn').textContent = debt.direction === 'owed_to_me' ? 'Вернули часть' : 'Вернул(а) часть';
+    $('#debtMoreBtn').textContent = debt.direction === 'owed_to_me' ? 'Дал(а) ещё' : 'Взял(а) ещё';
+    $('#debtMoves').innerHTML = '<div class="loading-placeholder"><div class="spinner"></div></div>';
+    request('api.php?action=debt&id=' + debt.id).then(d => {
+      $('#debtMoves').innerHTML = d.moves.length ? '<div class="limit-group-title">История</div>' + d.moves.map(m => `<div class="debt-move"><span>${fmtDate(m.occurred_on)}${m.note ? ' · ' + safe(m.note) : ''}</span><b>${m.amount > 0 ? '+' : '−'}${money(Math.abs(m.amount))}</b></div>`).join('') : '';
+    }).catch(() => { $('#debtMoves').innerHTML = ''; });
+  }
+  $('#debtModal').hidden = false;
+  if (!debt) setTimeout(() => $('#debtPerson').focus(), 100);
+}
+const closeDebtModal = () => { $('#debtModal').hidden = true; };
+$$('#debtModal [data-debt-close]').forEach(el => el.onclick = closeDebtModal);
+$$('#debtDirection button').forEach(b => b.onclick = () => { debtDir = b.dataset.dir; $$('#debtDirection button').forEach(x => x.classList.toggle('selected', x === b)); });
+['#debtAmount', '#debtMoveAmount', '#depositAmount'].forEach(sel => { $(sel).oninput = e => { const v = digitsOnly(e.target.value); e.target.value = v ? money(Number(v)) : ''; }; });
+$('#debtSave').onclick = async () => {
+  try {
+    const d = await request('api.php?action=debt_save', {method: 'POST', body: JSON.stringify({id: debtEditing?.id, person: $('#debtPerson').value, direction: debtDir,
+      amount: digitsOnly($('#debtAmount').value), note: $('#debtNote').value, due_on: $('#debtDue').value})});
+    haptic('success'); notice(debtEditing ? 'Сохранено ✓' : 'Долг записан ✓', true); closeDebtModal(); renderDebts(d.debts);
+  } catch(e) { haptic('error'); notice(e.message); }
+};
+async function debtMove(sign){
+  const v = Number(digitsOnly($('#debtMoveAmount').value));
+  if (!v) { notice('Введите сумму'); $('#debtMoveAmount').focus(); return; }
+  try {
+    const d = await request('api.php?action=debt_move', {method: 'POST', body: JSON.stringify({id: debtEditing.id, amount: v * sign, note: sign < 0 ? 'Возврат' : 'Добавлено'})});
+    haptic('success');
+    const updated = d.debts.find(x => x.id === debtEditing.id);
+    notice(updated ? 'Записано ✓' : 'Долг погашен полностью 🎉', true);
+    closeDebtModal(); renderDebts(d.debts);
+  } catch(e) { haptic('error'); notice(e.message); }
+}
+$('#debtRepayBtn').onclick = () => debtMove(-1);
+$('#debtMoreBtn').onclick = () => debtMove(1);
+$('#debtDelete').onclick = async () => {
+  if (!debtEditing || !(await showConfirm(`Удалить запись «${debtEditing.person}» вместе с историей?`))) return;
+  try { const d = await request('api.php?action=debt_delete', {method: 'POST', body: JSON.stringify({id: debtEditing.id})}); closeDebtModal(); renderDebts(d.debts); notice('Удалено', true); }
+  catch(e) { notice(e.message); }
+};
+$('#debtsOpen').onclick = openDebtsSheet;
+$('#debtAdd').onclick = () => openDebtModal();
+$('#debtAdd2').onclick = () => openDebtModal();
+$$('#debtsSheet [data-debts-close]').forEach(el => el.onclick = closeDebtsSheet);
+
+/* ========== DEPOSITS ========== */
+let depositsCache = [], depositEditing = null;
+function renderDeposits(deposits){
+  depositsCache = deposits || [];
+  const c = cur(currency);
+  if (!depositsCache.length) {
+    $('#depositsList').innerHTML = '<div class="limits-empty"><p>Добавьте депозиты, чтобы видеть, сколько отложено в банках.</p><button type="button" class="limits-empty-btn" data-deposit-new>Добавить депозит</button></div>';
+    $('#depositsList [data-deposit-new]').onclick = () => openDepositModal();
+    return;
+  }
+  const total = depositsCache.reduce((s, d) => s + d.amount, 0);
+  $('#depositsList').innerHTML = depositsCache.map(d => `
+    <button type="button" class="deposit-row" data-deposit="${d.id}">
+      <span class="debt-row-main"><b>${safe(d.title)}</b><small>${[d.bank && safe(d.bank), d.rate !== null && String(d.rate).replace('.', ',') + '% годовых'].filter(Boolean).join(' · ') || 'депозит'}</small></span>
+      <b>${money(d.amount)} ${c}</b>
+    </button>`).join('') + (depositsCache.length > 1 ? `<div class="deposit-total"><span>Всего на депозитах</span><b>${money(total)} ${c}</b></div>` : '');
+  $$('#depositsList [data-deposit]').forEach(b => b.onclick = () => openDepositModal(depositsCache.find(d => d.id === Number(b.dataset.deposit))));
+}
+function openDepositModal(dep = null){
+  depositEditing = dep;
+  $('#depositTitle').textContent = dep ? dep.title : 'Новый депозит';
+  $('#depositName').value = dep ? dep.title : '';
+  $('#depositBank').value = dep ? dep.bank : '';
+  $('#depositAmount').value = dep ? money(dep.amount) : '';
+  $('#depositRate').value = dep && dep.rate !== null ? String(dep.rate).replace('.', ',') : '';
+  $('#depositNote').value = dep ? dep.note : '';
+  $('#depositDelete').hidden = !dep;
+  $('#depositModal').hidden = false;
+  if (!dep) setTimeout(() => $('#depositName').focus(), 100);
+}
+const closeDepositModal = () => { $('#depositModal').hidden = true; };
+$$('#depositModal [data-deposit-close]').forEach(el => el.onclick = closeDepositModal);
+$('#depositSave').onclick = async () => {
+  try {
+    const d = await request('api.php?action=deposit_save', {method: 'POST', body: JSON.stringify({id: depositEditing?.id, title: $('#depositName').value, bank: $('#depositBank').value,
+      amount: digitsOnly($('#depositAmount').value), rate: $('#depositRate').value, note: $('#depositNote').value})});
+    haptic('success'); notice('Депозит сохранён ✓', true); closeDepositModal(); renderDeposits(d.deposits);
+  } catch(e) { haptic('error'); notice(e.message); }
+};
+$('#depositDelete').onclick = async () => {
+  if (!depositEditing || !(await showConfirm(`Удалить депозит «${depositEditing.title}»?`))) return;
+  try { const d = await request('api.php?action=deposit_delete', {method: 'POST', body: JSON.stringify({id: depositEditing.id})}); closeDepositModal(); renderDeposits(d.deposits); notice('Удалено', true); }
+  catch(e) { notice(e.message); }
+};
+$('#depositAdd').onclick = () => openDepositModal();
+
+/* ========== DATA RESET ========== */
+function renderResetStatus(r){
+  const el = $('#resetStatus');
+  if (!r) { el.hidden = true; $('#resetRequest').disabled = false; $('#resetRequest').textContent = 'Сбросить все данные'; return; }
+  el.hidden = false;
+  el.innerHTML = `Запрос от ${safe(r.initiator)} ждёт подтверждения в Telegram:<br>` + r.members.map(m => `${m.approved ? '✅' : '⏳'} ${safe(m.name)}`).join(' · ');
+  $('#resetRequest').disabled = true;
+  $('#resetRequest').textContent = 'Ждём подтверждения';
+}
+$('#resetRequest').onclick = async () => {
+  if (!(await showConfirm('Сбросить все данные бюджета? Бот попросит подтвердить вас обоих в Telegram.'))) return;
+  try {
+    const d = await request('api.php?action=reset_request', {method: 'POST', body: '{}'});
+    haptic('warning');
+    renderResetStatus(d.reset);
+    notice('Запрос отправлен в Telegram — подтвердите его оба', 'warn');
+  } catch(e) { haptic('error'); notice(e.message); }
+};
+
 /* ========== THEME ========== */
 function themePref(){ try { return localStorage.getItem('fb_theme') || 'auto'; } catch { return 'auto'; } }
 function applyTheme(){
@@ -1679,12 +1860,13 @@ tg?.onEvent?.('themeChanged', applyTheme);
 
 /* ========== TELEGRAM BACK BUTTON ========== */
 // Closes the topmost open layer, like the system back gesture would
-const LAYERS = ['#confirmModal', '#calModal', '#rangeCalModal', '#customCatModal', '#goalModal', '#moveModal', '#recModal', '#importSheet', '#drillSheet', '#profileSheet', '#sheet'];
+const LAYERS = ['#confirmModal', '#calModal', '#rangeCalModal', '#customCatModal', '#goalModal', '#moveModal', '#recModal', '#debtModal', '#depositModal', '#importSheet', '#debtsSheet', '#drillSheet', '#profileSheet', '#sheet'];
 function topLayer(){ return LAYERS.find(sel => !$(sel).hidden) || null; }
 function closeTopLayer(){
   const top = topLayer();
   ({'#calModal': closeSheetCalendar, '#rangeCalModal': closeRangeCalendar, '#customCatModal': closeCustomCatModal, '#goalModal': closeGoalModal,
     '#moveModal': closeMoveModal, '#recModal': closeRecModal, '#importSheet': closeImport, '#drillSheet': closeDrill,
+    '#debtModal': closeDebtModal, '#depositModal': closeDepositModal, '#debtsSheet': closeDebtsSheet,
     '#profileSheet': () => closeProfile(), '#sheet': () => closeSheet(), '#confirmModal': () => $('#confirmCancel').click()})[top]?.();
 }
 function syncBackButton(){

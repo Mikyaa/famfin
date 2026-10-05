@@ -141,6 +141,20 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       <div id="goalsList" class="goals"></div>
     </div>
 
+    <div class="section" id="debtsSection">
+      <div class="section-title"><h2>В долг</h2><button type="button" class="text-button" id="debtAdd">+ Добавить</button></div>
+      <button type="button" class="card debt-summary" id="debtsOpen" aria-label="Открыть список долгов">
+        <span class="debt-line"><span>Мне должны</span><b class="money-pos" id="debtOwedToMe">0 ₸</b></span>
+        <span class="debt-line"><span>Я должен</span><b class="money-neg" id="debtIOwe">0 ₸</b></span>
+        <span class="debt-hint" id="debtHint">Пока никого — нажмите «+ Добавить»</span>
+      </button>
+    </div>
+
+    <div class="section" id="depositsSection">
+      <div class="section-title"><h2>Депозиты</h2><button type="button" class="text-button" id="depositAdd">+ Добавить</button></div>
+      <div id="depositsList" class="card deposits"></div>
+    </div>
+
     <div class="section" id="limitsSection">
       <div class="section-title"><h2>Лимиты</h2><button type="button" class="text-button" id="limitsEdit">Настроить</button></div>
       <div id="limitsList" class="limits card"></div>
@@ -432,6 +446,12 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       <div class="group-toggle" id="warnToggle"></div>
 
       <button class="sheet-submit" id="limitsSave" type="button" disabled>Сохранить лимиты</button>
+      <div class="danger-zone">
+        <h3 class="profile-section-title">Сброс данных</h3>
+        <p class="limits-help">Удалит операции, лимиты, цели, платежи, долги и депозиты. Сработает только после подтверждения обоими в Telegram; перед сбросом бот сделает резервную копию.</p>
+        <div class="reset-status" id="resetStatus" hidden></div>
+        <button type="button" class="danger-button" id="resetRequest">Сбросить все данные</button>
+      </div>
       <?php if (!$localDev): ?><a href="logout.php" class="profile-logout" id="profileLogout">Выйти из аккаунта</a><?php endif; ?>
     </div>
   </div>
@@ -510,6 +530,63 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
         <button class="sheet-submit" id="importConfirm" type="button">Импортировать</button>
         <button class="secondary-button" id="importBack" type="button">← Выбрать другой файл</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="debtsSheet" hidden>
+  <div class="sheet-backdrop" data-debts-close></div>
+  <div class="sheet-content" role="dialog" aria-labelledby="debtsTitle">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header"><h2 id="debtsTitle">В долг</h2><button class="sheet-close" data-debts-close aria-label="Закрыть">×</button></div>
+    <div class="sheet-body">
+      <div class="debt-totals" id="debtTotals"></div>
+      <div id="debtsList" class="debts-list"></div>
+      <button type="button" class="sheet-submit" id="debtAdd2">+ Добавить долг</button>
+    </div>
+  </div>
+</div>
+
+<div class="cal-modal" id="debtModal" hidden>
+  <div class="cal-backdrop" data-debt-close></div>
+  <div class="cal-content small" role="dialog" aria-labelledby="debtTitle">
+    <div class="cal-header"><div id="debtTitle">Новый долг</div><button class="sheet-close" data-debt-close aria-label="Закрыть">×</button></div>
+    <div class="cat-form">
+      <div class="debt-current" id="debtCurrent" hidden></div>
+      <div class="debt-repay" id="debtRepay" hidden>
+        <label>Сумма, ₸<input id="debtMoveAmount" inputmode="numeric" placeholder="10 000" autocomplete="off"></label>
+        <div class="debt-repay-buttons">
+          <button type="button" class="pill-button" id="debtRepayBtn">Вернули часть</button>
+          <button type="button" class="pill-button ghost" id="debtMoreBtn">Ещё в долг</button>
+        </div>
+        <div class="debt-moves" id="debtMoves"></div>
+      </div>
+      <div class="group-toggle" id="debtDirection">
+        <button type="button" data-dir="owed_to_me" class="selected">Мне должны</button>
+        <button type="button" data-dir="i_owe">Я должен</button>
+      </div>
+      <label>Кто<input id="debtPerson" maxlength="80" placeholder="Имя" autocomplete="off"></label>
+      <label id="debtAmountLabel">Сумма, ₸<input id="debtAmount" inputmode="numeric" placeholder="50 000" autocomplete="off"></label>
+      <label>Комментарий <span class="optional">необязательно</span><input id="debtNote" maxlength="300" placeholder="За что" autocomplete="off"></label>
+      <label>Вернуть до <span class="optional">необязательно</span><input id="debtDue" type="date"></label>
+      <button id="debtSave" class="sheet-submit" type="button">Сохранить</button>
+      <button id="debtDelete" class="sheet-delete" type="button" hidden>Удалить запись</button>
+    </div>
+  </div>
+</div>
+
+<div class="cal-modal" id="depositModal" hidden>
+  <div class="cal-backdrop" data-deposit-close></div>
+  <div class="cal-content small" role="dialog" aria-labelledby="depositTitle">
+    <div class="cal-header"><div id="depositTitle">Депозит</div><button class="sheet-close" data-deposit-close aria-label="Закрыть">×</button></div>
+    <div class="cat-form">
+      <label>Название<input id="depositName" maxlength="80" placeholder="Например, На квартиру" autocomplete="off"></label>
+      <label>Банк <span class="optional">необязательно</span><input id="depositBank" maxlength="80" placeholder="Kaspi, Halyk, Freedom…" autocomplete="off"></label>
+      <label>Сумма на депозите, ₸<input id="depositAmount" inputmode="numeric" placeholder="1 000 000" autocomplete="off"></label>
+      <label>Ставка, % годовых <span class="optional">необязательно</span><input id="depositRate" inputmode="decimal" placeholder="14,5" autocomplete="off"></label>
+      <label>Комментарий <span class="optional">необязательно</span><input id="depositNote" maxlength="300" autocomplete="off"></label>
+      <button id="depositSave" class="sheet-submit" type="button">Сохранить</button>
+      <button id="depositDelete" class="sheet-delete" type="button" hidden>Удалить депозит</button>
     </div>
   </div>
 </div>

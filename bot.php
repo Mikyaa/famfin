@@ -270,6 +270,11 @@ function bot_handle_callback(array $cb): void {
         $edit(bot_import_report($res, $entries, (int)$p['payer']), $undo);
         $answer($res['ids'] ? 'Готово' : 'Новых операций нет');
         return;
+      case 'reset':
+        $msg = reset_vote((int)$p['rid'], $userId, $opt === 'approve');
+        $edit(($opt === 'approve' ? '✅ ' : '✖️ ') . $msg);
+        $answer(mb_substr($msg, 0, 190));
+        return;
       case 'adjust_undo':
         delete_adjustment((int)$p['id']);
         $edit('↩️ Сверка отменена — корректировка остатка удалена');

@@ -20,6 +20,7 @@ function features_schema(PDO $pdo): void {
     statement_jobs_schema($pdo);
     adjustments_schema($pdo);
     $pdo->exec("CREATE TABLE IF NOT EXISTS custom_categories(name TEXT PRIMARY KEY,grp TEXT NOT NULL DEFAULT 'variable',created_by INTEGER NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);");
+    debts_schema($pdo);
     return;
   }
   $cs = 'DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci';
@@ -36,6 +37,7 @@ function features_schema(PDO $pdo): void {
   statement_jobs_schema($pdo);
   adjustments_schema($pdo);
   $pdo->exec("CREATE TABLE IF NOT EXISTS custom_categories(name VARCHAR(80) PRIMARY KEY,grp VARCHAR(16) NOT NULL DEFAULT 'variable',created_by BIGINT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+  debts_schema($pdo);
 }
 
 /* ========== CUSTOM CATEGORIES ========== */
@@ -912,4 +914,211 @@ function reconcile_report(array $r, string $account, float $bankAmount, string $
   return "⚖️ Сверено с банком · $account\nВ банке на $d: " . fmt_money_exact($bankAmount) . "\nВ бюджете было: " . fmt_money_exact($r['before']) .
     "\nКорректировка остатка: " . ($r['diff'] > 0 ? '+' : '−') . fmt_money_exact(abs($r['diff'])) .
     "\n\nКорректировка меняет только остаток — в отчётах о доходах и расходах её нет.";
+}
+
+/* ========== DEBTS AND DEPOSITS ========== */
+// Tracked alongside the budget, not inside it: they do not change the family balance.
+// A debt is a person plus a direction; its amount is the sum of its moves (+ lent/borrowed more, − repaid).
+
+function debts_schema(PDO $pdo): void {
+  if (is_sqlite()) {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS debts(id INTEGER PRIMARY KEY AUTOINCREMENT,person TEXT NOT NULL,direction TEXT NOT NULL,note TEXT NOT NULL DEFAULT '',due_on TEXT NULL,closed INTEGER NOT NULL DEFAULT 0,created_by INTEGER NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS debt_moves(id INTEGER PRIMARY KEY AUTOINCREMENT,debt_id INTEGER NOT NULL,amount NUMERIC NOT NULL,occurred_on TEXT NOT NULL,note TEXT NOT NULL DEFAULT '',created_by INTEGER NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS deposits(id INTEGER PRIMARY KEY AUTOINCREMENT,title TEXT NOT NULL,bank TEXT NOT NULL DEFAULT '',amount NUMERIC NOT NULL DEFAULT 0,rate NUMERIC NULL,note TEXT NOT NULL DEFAULT '',created_by INTEGER NULL,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS reset_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,initiator INTEGER NOT NULL,approvals TEXT NOT NULL DEFAULT '[]',status TEXT NOT NULL DEFAULT 'pending',created_at TEXT DEFAULT CURRENT_TIMESTAMP);");
+    return;
+  }
+  $cs = 'DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci';
+  $pdo->exec("CREATE TABLE IF NOT EXISTS debts(id BIGINT AUTO_INCREMENT PRIMARY KEY,person VARCHAR(80) NOT NULL,direction VARCHAR(12) NOT NULL,note VARCHAR(300) NOT NULL DEFAULT '',due_on DATE NULL,closed TINYINT NOT NULL DEFAULT 0,created_by BIGINT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) $cs");
+  $pdo->exec("CREATE TABLE IF NOT EXISTS debt_moves(id BIGINT AUTO_INCREMENT PRIMARY KEY,debt_id BIGINT NOT NULL,amount DECIMAL(14,2) NOT NULL,occurred_on DATE NOT NULL,note VARCHAR(300) NOT NULL DEFAULT '',created_by BIGINT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) $cs");
+  $pdo->exec("CREATE TABLE IF NOT EXISTS deposits(id BIGINT AUTO_INCREMENT PRIMARY KEY,title VARCHAR(80) NOT NULL,bank VARCHAR(80) NOT NULL DEFAULT '',amount DECIMAL(14,2) NOT NULL DEFAULT 0,rate DECIMAL(6,2) NULL,note VARCHAR(300) NOT NULL DEFAULT '',created_by BIGINT NULL,updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) $cs");
+  $pdo->exec("CREATE TABLE IF NOT EXISTS reset_requests(id BIGINT AUTO_INCREMENT PRIMARY KEY,initiator BIGINT NOT NULL,approvals VARCHAR(255) NOT NULL DEFAULT '[]',status VARCHAR(10) NOT NULL DEFAULT 'pending',created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) $cs");
+}
+
+// direction: 'owed_to_me' (they owe me, shown green +) or 'i_owe' (I owe them, shown red −)
+function debts_list(bool $withClosed = false): array {
+  $sums = [];
+  foreach (db()->query('SELECT debt_id,SUM(amount) s,MAX(occurred_on) last FROM debt_moves GROUP BY debt_id') as $r) $sums[(int)$r['debt_id']] = ['s' => (float)$r['s'], 'last' => $r['last']];
+  $out = [];
+  foreach (db()->query('SELECT * FROM debts' . ($withClosed ? '' : ' WHERE closed=0') . ' ORDER BY closed,id DESC') as $d) {
+    $id = (int)$d['id'];
+    $out[] = ['id' => $id, 'person' => $d['person'], 'direction' => $d['direction'], 'note' => $d['note'], 'due_on' => $d['due_on'],
+      'amount' => round($sums[$id]['s'] ?? 0, 2), 'last_move' => $sums[$id]['last'] ?? null, 'closed' => (bool)$d['closed']];
+  }
+  return $out;
+}
+
+function debt_totals(array $debts): array {
+  $t = ['owed_to_me' => 0.0, 'i_owe' => 0.0];
+  foreach ($debts as $d) if (!$d['closed']) $t[$d['direction']] += $d['amount'];
+  return $t;
+}
+
+function debt_moves(int $debtId): array {
+  $q = db()->prepare('SELECT id,amount,occurred_on,note FROM debt_moves WHERE debt_id=? ORDER BY occurred_on DESC,id DESC');
+  $q->execute([$debtId]);
+  return $q->fetchAll();
+}
+
+function debt_save(array $d, array $member): int {
+  $person = trim((string)($d['person'] ?? ''));
+  $direction = $d['direction'] ?? '';
+  $note = trim((string)($d['note'] ?? ''));
+  $due = trim((string)($d['due_on'] ?? ''));
+  if ($person === '' || mb_strlen($person) > 80) throw new RuntimeException('Укажите, кто это');
+  if (!in_array($direction, ['owed_to_me', 'i_owe'], true)) throw new RuntimeException('Укажите, кто кому должен');
+  if (mb_strlen($note) > 300) throw new RuntimeException('Слишком длинный комментарий');
+  if ($due !== '' && !valid_date($due, true)) throw new RuntimeException('Неверная дата возврата');
+  $id = (int)($d['id'] ?? 0);
+  if ($id) {
+    db()->prepare('UPDATE debts SET person=?,direction=?,note=?,due_on=? WHERE id=?')->execute([$person, $direction, $note, $due ?: null, $id]);
+    return $id;
+  }
+  $amount = parse_amount($d['amount'] ?? null);
+  if ($amount === null) throw new RuntimeException('Введите сумму долга');
+  $pdo = db();
+  $pdo->beginTransaction();
+  try {
+    $pdo->prepare('INSERT INTO debts(person,direction,note,due_on,created_by) VALUES(?,?,?,?,?)')->execute([$person, $direction, $note, $due ?: null, $member['id']]);
+    $id = (int)$pdo->lastInsertId();
+    $pdo->prepare('INSERT INTO debt_moves(debt_id,amount,occurred_on,note,created_by) VALUES(?,?,?,?,?)')->execute([$id, $amount, date('Y-m-d'), 'Начало долга', $member['id']]);
+    $pdo->commit();
+  } catch (Throwable $e) { $pdo->rollBack(); throw $e; }
+  return $id;
+}
+
+// Positive: the debt grows (lent / borrowed more); negative: part of it was returned
+function debt_move(int $debtId, $amount, string $note, array $member): void {
+  $raw = is_string($amount) ? str_replace([' ', "\u{00A0}", ','], ['', '', '.'], $amount) : $amount;
+  $v = filter_var($raw, FILTER_VALIDATE_FLOAT);
+  if ($v === false || $v == 0.0 || abs($v) > 100000000) throw new RuntimeException('Введите сумму');
+  $current = 0.0;
+  foreach (debts_list(true) as $d) if ($d['id'] === $debtId) $current = $d['amount'];
+  if ($v < 0 && -$v > $current + 0.005) throw new RuntimeException('Возвращают больше, чем остаток долга (' . fmt_money($current) . ')');
+  db()->prepare('INSERT INTO debt_moves(debt_id,amount,occurred_on,note,created_by) VALUES(?,?,?,?,?)')->execute([$debtId, round($v, 2), date('Y-m-d'), mb_substr(trim($note), 0, 300), $member['id']]);
+  // Fully repaid debts close themselves
+  if (abs($current + $v) < 0.005) db()->prepare('UPDATE debts SET closed=1 WHERE id=?')->execute([$debtId]);
+}
+
+function debt_delete(int $id): void {
+  db()->prepare('DELETE FROM debt_moves WHERE debt_id=?')->execute([$id]);
+  db()->prepare('DELETE FROM debts WHERE id=?')->execute([$id]);
+}
+
+function deposits_list(): array {
+  $out = [];
+  foreach (db()->query('SELECT * FROM deposits ORDER BY amount DESC,id') as $r) {
+    $out[] = ['id' => (int)$r['id'], 'title' => $r['title'], 'bank' => $r['bank'], 'amount' => (float)$r['amount'],
+      'rate' => $r['rate'] === null ? null : (float)$r['rate'], 'note' => $r['note'], 'updated_at' => $r['updated_at']];
+  }
+  return $out;
+}
+
+function deposit_save(array $d, array $member): int {
+  $title = trim((string)($d['title'] ?? ''));
+  $bank = trim((string)($d['bank'] ?? ''));
+  $note = trim((string)($d['note'] ?? ''));
+  $raw = str_replace([' ', "\u{00A0}", ','], ['', '', '.'], (string)($d['amount'] ?? '0'));
+  $amount = $raw === '' ? 0.0 : filter_var($raw, FILTER_VALIDATE_FLOAT);
+  $rateRaw = trim(str_replace(',', '.', (string)($d['rate'] ?? '')));
+  $rate = $rateRaw === '' ? null : filter_var($rateRaw, FILTER_VALIDATE_FLOAT);
+  if ($title === '' || mb_strlen($title) > 80 || mb_strlen($bank) > 80 || mb_strlen($note) > 300) throw new RuntimeException('Укажите название депозита');
+  if ($amount === false || $amount < 0 || $amount > 10000000000) throw new RuntimeException('Неверная сумма');
+  if ($rate === false || ($rate !== null && ($rate < 0 || $rate > 100))) throw new RuntimeException('Ставка — от 0 до 100%');
+  $id = (int)($d['id'] ?? 0);
+  if ($id) {
+    db()->prepare('UPDATE deposits SET title=?,bank=?,amount=?,rate=?,note=?,updated_at=CURRENT_TIMESTAMP WHERE id=?')->execute([$title, $bank, round($amount, 2), $rate, $note, $id]);
+    return $id;
+  }
+  db()->prepare('INSERT INTO deposits(title,bank,amount,rate,note,created_by) VALUES(?,?,?,?,?,?)')->execute([$title, $bank, round($amount, 2), $rate, $note, $member['id']]);
+  return (int)db()->lastInsertId();
+}
+
+function deposit_delete(int $id): void { db()->prepare('DELETE FROM deposits WHERE id=?')->execute([$id]); }
+
+/* ========== DATA RESET (both members confirm in Telegram) ========== */
+const RESET_TABLES = ['transactions', 'transfers', 'goals', 'goal_moves', 'recurring', 'spend_limits', 'limit_notices', 'balance_adjustments',
+  'debts', 'debt_moves', 'deposits', 'custom_categories', 'statement_jobs'];
+
+function reset_pending(): ?array {
+  $r = db()->query("SELECT * FROM reset_requests WHERE status='pending' ORDER BY id DESC LIMIT 1")->fetch();
+  if (!$r) return null;
+  // A request lives 24 hours
+  if (strtotime($r['created_at'] . ' UTC') < time() - 86400) {
+    db()->prepare("UPDATE reset_requests SET status='expired' WHERE id=?")->execute([$r['id']]);
+    return null;
+  }
+  $r['approvals'] = json_decode($r['approvals'], true) ?: [];
+  return $r;
+}
+
+function reset_status(): ?array {
+  $r = reset_pending();
+  if (!$r) return null;
+  $names = allowed_members_map();
+  return ['id' => (int)$r['id'], 'initiator' => $names[(int)$r['initiator']] ?? '?',
+    'members' => array_map(fn($id) => ['name' => $names[$id] ?? '?', 'approved' => in_array($id, $r['approvals'], true)], array_keys($names))];
+}
+
+function send_member_message(int $id, string $text, ?array $markup = null): void {
+  global $config;
+  if (!empty($config['local_test_mode']) && !getenv('FAMFIN_DRY_TELEGRAM')) { error_log("[to $id] $text"); return; }
+  $payload = ['chat_id' => $id, 'text' => $text];
+  if ($markup) $payload['reply_markup'] = $markup;
+  try { telegram('sendMessage', $payload); } catch (Throwable $e) { error_log('send failed: ' . $e->getMessage()); }
+}
+
+function reset_request(array $member): array {
+  global $config;
+  if (reset_pending()) throw new RuntimeException('Запрос на сброс уже отправлен — подтвердите его в Telegram');
+  db()->prepare('INSERT INTO reset_requests(initiator) VALUES(?)')->execute([$member['id']]);
+  $rid = (int)db()->lastInsertId();
+  foreach ($config['allowed_users'] as $uid) {
+    $markup = bot_keyboard($uid, ['type' => 'reset', 'rid' => $rid, 'opts' => ['approve', 'decline']], ['✅ Подтверждаю сброс', '✖️ Отклонить'], 1);
+    send_member_message($uid, "🧹 {$member['name']} хочет сбросить все данные семейного бюджета: операции, лимиты, цели, платежи, долги и депозиты.\n\nСброс произойдёт, только когда подтвердят оба. Перед сбросом сделаю резервную копию. Запрос действует 24 часа.", $markup);
+  }
+  return reset_status();
+}
+
+// Wipes the family data after a full backup; members and logins stay
+function perform_reset(): array {
+  global $config;
+  $backup = null;
+  if (is_sqlite()) {
+    $backup = make_backup();
+    if (!empty($config['backup_chat_id'])) { try { send_backup((string)$config['backup_chat_id'], $backup); } catch (Throwable $e) { error_log('reset backup send failed: ' . $e->getMessage()); } }
+  }
+  $pdo = db();
+  $pdo->beginTransaction();
+  try {
+    foreach (RESET_TABLES as $t) $pdo->exec("DELETE FROM $t");
+    $pdo->exec("DELETE FROM settings WHERE k IN ('limit_warn_percent','limit_rollover','monthly_summary_sent')");
+    $pdo->commit();
+  } catch (Throwable $e) { $pdo->rollBack(); throw $e; }
+  mark_balance_changed();
+  return ['backup' => $backup ? basename($backup['file']) : null];
+}
+
+// Returns a short status for the callback answer
+function reset_vote(int $rid, int $userId, bool $approve): string {
+  global $config;
+  $r = reset_pending();
+  if (!$r || (int)$r['id'] !== $rid) return 'Этот запрос уже не действует';
+  $name = user_label($userId);
+  if (!$approve) {
+    db()->prepare("UPDATE reset_requests SET status='declined' WHERE id=?")->execute([$rid]);
+    foreach ($config['allowed_users'] as $uid) send_member_message($uid, "✖️ $name отклонил(а) сброс данных. Ничего не удалено.");
+    return 'Сброс отклонён';
+  }
+  $approvals = array_values(array_unique(array_merge($r['approvals'], [$userId])));
+  db()->prepare('UPDATE reset_requests SET approvals=? WHERE id=?')->execute([json_encode($approvals), $rid]);
+  $waiting = array_diff($config['allowed_users'], $approvals);
+  if ($waiting) {
+    foreach ($config['allowed_users'] as $uid) if ($uid !== $userId) send_member_message($uid, "✅ $name подтвердил(а) сброс данных. Ждём вашего подтверждения.");
+    return 'Подтверждено. Ждём: ' . implode(', ', array_map('user_label', $waiting));
+  }
+  db()->prepare("UPDATE reset_requests SET status='done' WHERE id=?")->execute([$rid]);
+  $res = perform_reset();
+  foreach ($config['allowed_users'] as $uid) send_member_message($uid, '🧹 Данные бюджета сброшены — оба подтвердили.' . ($res['backup'] ? "\nКопия до сброса: {$res['backup']} (отправлена владельцу резервных копий)." : ''));
+  return 'Данные сброшены';
 }

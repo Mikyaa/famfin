@@ -32,6 +32,9 @@ try {
       'recent' => $recent,
       'transfers' => list_transfers(5),
       'goals' => goals_list(),
+      'debts' => debts_list(),
+      'deposits' => deposits_list(),
+      'reset' => reset_status(),
       'forecast' => month_forecast(),
       'recurring' => recurring_list(),
       'members' => array_map(fn($id, $name) => ['id' => $id, 'name' => $name], array_keys(allowed_members_map()), allowed_members_map()),
@@ -39,6 +42,17 @@ try {
       'category_groups' => category_groups_all(),
     ]);
   }
+
+  if ($method === 'GET' && $action === 'debt') {
+    $id = (int)($_GET['id'] ?? 0);
+    json_out(['moves' => debt_moves($id)]);
+  }
+  if ($method === 'POST' && $action === 'debt_save') { $id = debt_save(body(), $member); json_out(['ok' => true, 'id' => $id, 'debts' => debts_list()]); }
+  if ($method === 'POST' && $action === 'debt_move') { $d = body(); debt_move((int)($d['id'] ?? 0), $d['amount'] ?? null, (string)($d['note'] ?? ''), $member); json_out(['ok' => true, 'debts' => debts_list()]); }
+  if ($method === 'POST' && $action === 'debt_delete') { debt_delete((int)(body()['id'] ?? 0)); json_out(['ok' => true, 'debts' => debts_list()]); }
+  if ($method === 'POST' && $action === 'deposit_save') { deposit_save(body(), $member); json_out(['ok' => true, 'deposits' => deposits_list()]); }
+  if ($method === 'POST' && $action === 'deposit_delete') { deposit_delete((int)(body()['id'] ?? 0)); json_out(['ok' => true, 'deposits' => deposits_list()]); }
+  if ($method === 'POST' && $action === 'reset_request') { json_out(['ok' => true, 'reset' => reset_request($member)]); }
 
   if ($method === 'POST' && $action === 'category_add') {
     $d = body();
