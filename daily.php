@@ -11,6 +11,8 @@ fwrite(STDOUT, date('c') . ' Recurring reminders sent: ' . send_recurring_remind
 fwrite(STDOUT, date('c') . ' Debt reminders sent: ' . send_debt_reminders() . "\n");
 if (date('j') === '1') fwrite(STDOUT, date('c') . ' Deposit interest offers: ' . send_deposit_interest_suggestions() . "\n");
 fwrite(STDOUT, date('c') . ' Trash entries purged: ' . trash_purge() . "\n");
+fwrite(STDOUT, date('c') . ' Morning digests: ' . send_morning_digests() . "\n");
+fwrite(STDOUT, date('c') . ' Goal reminders: ' . send_goal_reminders() . "\n");
 // On January 1st both members get the summary of the year that just ended
 $lastYear = (int)date('Y') - 1;
 if (date('m-d') === '01-01' && get_setting('year_summary_sent') !== (string)$lastYear) {

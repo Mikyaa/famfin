@@ -1,6 +1,6 @@
 <?php
 require __DIR__.'/lib.php';
-header("Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org https://cdnjs.cloudflare.com; worker-src 'self' blob: https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org; base-uri 'self'; form-action 'self'");
+header("Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org https://cdnjs.cloudflare.com; worker-src 'self' blob: https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org; base-uri 'self'; form-action 'self'");
 header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: strict-origin-when-cross-origin');
 // Set bot_username in config.php to skip the getMe round-trip on every page load
@@ -107,6 +107,8 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
     </div>
 
     <div class="card capital" id="capitalCard" hidden></div>
+    <div class="card settle-card" id="settleCard" hidden></div>
+    <button type="button" class="card trip-card" id="tripCard" hidden></button>
 
     <div class="balances-personal" id="balancesPersonal"></div>
 
@@ -168,6 +170,10 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
         <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v14H4zM4 10h16M8 3v4M16 3v4M8 14h2M14 14h2M8 17h2"/></svg></span>
         <span class="panel-text"><b>Календарь</b><small id="calendarTileSub">Платежи месяца</small></span>
       </button>
+      <button type="button" class="panel-tile" id="tripsOpen" aria-label="Поездки: открыть">
+        <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 14l18-7-6 13-3-5-5-1zM12 15l9-8"/></svg></span>
+        <span class="panel-text"><b>Поездки</b><small id="tripTileSub">Бюджет отпуска</small></span>
+      </button>
     </div>
 
     <div class="section" id="limitsSection">
@@ -222,6 +228,14 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       <button type="button" class="secondary-button year-send" id="yearSend" hidden>🎉 Итоги года — прислать в Telegram</button>
     </div>
 
+    <div class="section" id="compareSection" hidden>
+      <div id="unusualList" class="unusual-list"></div>
+      <details class="card fold" id="yoyFold">
+        <summary><span><b>Против прошлого года</b><small id="yoySum">—</small></span><i class="pf-chev" aria-hidden="true"></i></summary>
+        <div id="yoyList" class="journal"></div>
+      </details>
+    </div>
+
     <div class="section">
       <div class="section-title"><h2>Обязательные и переменные</h2></div>
       <div id="groups" class="card groups"></div>
@@ -258,6 +272,7 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
         <button type="button" class="pill-button ghost" data-export="pdf">PDF</button>
         <button type="button" class="pill-button ghost" data-export="xlsx">Excel</button>
         <button type="button" class="pill-button ghost" data-export="csv">CSV</button>
+        <button type="button" class="pill-button ghost" id="catPdfOpen">PDF по категориям</button>
       </div>
       <div id="reportHistory" class="history"></div>
       <div class="pagination" id="pagination"></div>
@@ -345,8 +360,23 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
         <div class="date-row account-row" id="accountRow"></div>
       </div>
 
+      <div class="entry-fields" id="splitField" hidden>
+        <div class="field-label">Общая трата</div>
+        <div class="group-toggle three" id="splitToggle">
+          <button type="button" data-split="" class="selected">Моя</button>
+          <button type="button" data-split="half">Пополам</button>
+          <button type="button" data-split="other">За другого</button>
+        </div>
+      </div>
+
       <div class="field-label">Комментарий <span class="optional">необязательно</span></div>
       <input id="noteInput" class="note-input" maxlength="500" placeholder="Например, продукты на неделю" autocomplete="off">
+
+      <div class="photo-row" id="photoRow">
+        <label class="photo-pick"><input type="file" accept="image/*" id="photoInput" hidden><span>📎 Фото чека</span></label>
+        <button type="button" class="photo-thumb" id="photoThumb" hidden aria-label="Открыть фото"><img alt="Фото чека" id="photoThumbImg"></button>
+        <button type="button" class="text-button" id="photoRemove" hidden>Убрать фото</button>
+      </div>
 
       <button class="sheet-submit" id="submitBtn" type="button">Сохранить <span>↗</span></button>
       <button class="sheet-delete" id="sheetDelete" type="button" hidden>Удалить запись</button>
@@ -425,115 +455,137 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       <h2 id="profileTitle">Профиль</h2>
       <button class="sheet-close" data-profile-close aria-label="Закрыть">×</button>
     </div>
-    <div class="sheet-body">
+    <div class="sheet-body profile-body">
       <div class="profile-head">
         <i class="balance-dot" id="profileDot">₸</i>
         <div><div class="balance-name" id="profileName">—</div><div class="balance-sub">Семейный бюджет · доступ через Telegram</div></div>
       </div>
-
-      <button type="button" class="panel-tile wide" id="categoriesOpen">
-        <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12V4h8l9 9-8 8-9-9zM7.5 7.5h.01"/></svg></span>
-        <span class="panel-text"><b>Категории</b><small>Переименовать, удалить, сменить группу</small></span>
-      </button>
-      <div class="panel-tiles profile-tiles">
-        <button type="button" class="panel-tile" id="auditOpen">
-          <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v4l3 2M3.5 12a8.5 8.5 0 1 0 2.5-6M3 4v4h4"/></svg></span>
-          <span class="panel-text"><b>Журнал</b><small>Кто что менял</small></span>
-        </button>
-        <button type="button" class="panel-tile" id="trashOpen">
-          <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M10 7V4h4v3M6 7l1 13h10l1-13"/></svg></span>
-          <span class="panel-text"><b>Корзина</b><small>Вернуть удалённое</small></span>
-        </button>
+      <div class="pf-grid">
+        <button type="button" class="pf-tile" id="categoriesOpen"><span class="pf-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12V4h8l9 9-8 8-9-9zM7.5 7.5h.01"/></svg></span><b>Категории</b></button>
+        <button type="button" class="pf-tile" id="auditOpen"><span class="pf-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v4l3 2M3.5 12a8.5 8.5 0 1 0 2.5-6M3 4v4h4"/></svg></span><b>Журнал</b></button>
+        <button type="button" class="pf-tile" id="trashOpen"><span class="pf-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M10 7V4h4v3M6 7l1 13h10l1-13"/></svg></span><b>Корзина</b></button>
       </div>
-
-      <div>
-        <h3 class="profile-section-title">Уведомления</h3>
-        <label class="switch-row threshold-row"><span><b>Крупная трата</b><small>Если кто-то запишет трату от этой суммы, второму придёт сообщение. 0 — не уведомлять.</small></span>
-          <span class="limit-input"><input id="bigExpenseInput" inputmode="numeric" autocomplete="off" aria-label="Порог крупной траты"><b>₸</b></span></label>
-      </div>
-
-      <div>
-        <h3 class="profile-section-title">Оформление</h3>
-        <div class="group-toggle three" id="themeToggle">
-          <button type="button" data-theme-choice="auto">Авто</button>
-          <button type="button" data-theme-choice="light">Светлая</button>
-          <button type="button" data-theme-choice="dark">Тёмная</button>
+      <div class="pf-list">
+      <details class="pf-sec" id="notifySec" name="pf">
+        <summary><span class="pf-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4zM10 20a2 2 0 0 0 4 0"/></svg></span><span class="pf-sum"><b>Уведомления</b><small id="notifySum">—</small></span><i class="pf-chev" aria-hidden="true"></i></summary>
+        <div class="pf-body">
+          <label class="switch-row threshold-row"><span><b>Крупная трата</b><small>Второму придёт сообщение о трате от этой суммы. 0 — выкл.</small></span>
+            <span class="limit-input"><input id="bigExpenseInput" inputmode="numeric" autocomplete="off" aria-label="Порог крупной траты"><b>₸</b></span></label>
+          <label class="switch-row"><span><b>Утренняя сводка</b><small>В 9:00: платежи на сегодня, вчерашние траты, план и лимиты</small></span>
+            <input type="checkbox" id="digestToggle" role="switch"><i class="switch" aria-hidden="true"></i></label>
+          <button type="button" class="text-button" id="digestPreview">Показать пример сводки</button>
+          <pre class="pf-preview" id="digestBox" hidden></pre>
         </div>
-      </div>
-
-      <div>
-        <h3 class="profile-section-title">Siri и быстрый ввод</h3>
-        <p class="limits-help">Скажите «Привет, Siri, трата» и продиктуйте «кафе пять тысяч». Ссылка личная: записи будут от вашего имени.</p>
-        <button type="button" class="secondary-button" id="siriSetup">Настроить Siri</button>
-        <div class="siri-box" id="siriBox" hidden>
-          <ol class="siri-steps">
-            <li>Откройте «Команды» → «+» и назовите команду «Трата».</li>
-            <li>Добавьте действие «Диктовать текст».</li>
-            <li>Добавьте «Получить содержимое URL»: вставьте ссылку ниже, метод <b>POST</b>, тело запроса — «Форма», поле <b>text</b> = «Продиктованный текст».</li>
-            <li>Добавьте «Показать результат» — Siri прочитает ответ.</li>
-          </ol>
-          <div class="siri-url" id="siriUrl"></div>
-          <div class="siri-actions">
-            <button type="button" class="secondary-button" id="siriCopy">Скопировать ссылку</button>
-            <button type="button" class="text-button" id="siriRenew">Новая ссылка</button>
+      </details>
+      <details class="pf-sec" id="limitsSec" name="pf">
+        <summary><span class="pf-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19h16M7 16V9M12 16V5M17 16v-4"/></svg></span><span class="pf-sum"><b>Лимиты</b><small id="limitsSum">Месяц и неделя</small></span><i class="pf-chev" aria-hidden="true"></i></summary>
+        <div class="pf-body">
+          <p class="pf-note">Трату можно записать и сверх лимита — бот просто предупредит. Неделя — с понедельника.</p>
+          <div class="limit-tabs">
+            <div class="group-toggle" id="limitScope" role="tablist" aria-label="Чьи лимиты">
+              <button type="button" data-scope="family" class="selected">Семья <em></em></button>
+              <button type="button" data-scope="me">Только мои <em></em></button>
+            </div>
+            <div class="group-toggle" id="limitPeriod" role="tablist" aria-label="Период">
+              <button type="button" data-period="month" class="selected">Месяц <em></em></button>
+              <button type="button" data-period="week">Неделя <em></em></button>
+            </div>
+            <p class="limit-scope-hint" id="limitScopeHint"></p>
           </div>
-          <p class="field-help">Голосовые сообщения боту тоже работают: просто наговорите «такси две тысячи».</p>
+
+          <div id="limitsForm" class="limit-form"><div class="loading-placeholder"><div class="spinner"></div></div></div>
+          <button type="button" class="custom-cat-btn" id="limitsAddCat">+ Новая категория</button>
+
+          <div class="limit-group-title">Настройки</div>
+          <label class="switch-row">
+            <span><b>Переносить остаток</b><small>Неистраченное прибавится к лимиту следующего периода, перерасход — вычтется из него.</small></span>
+            <input type="checkbox" id="rolloverToggle" role="switch">
+            <i class="switch" aria-hidden="true"></i>
+          </label>
+          <div class="field-label">Предупреждать, когда осталось меньше</div>
+          <div class="group-toggle" id="warnToggle"></div>
+
+          <button class="sheet-submit" id="limitsSave" type="button" disabled>Сохранить лимиты</button>
         </div>
-      </div>
-
-      <div id="recurringBlock">
-        <h3 class="profile-section-title">Регулярные платежи</h3>
-        <p class="limits-help">Кредиты, коммуналка, подписки. В нужный день бот напомнит, а записать платёж можно одной кнопкой.</p>
-        <div id="recurringList" class="recurring-list"></div>
-        <button type="button" class="secondary-button" id="recurringAdd">+ Добавить платёж</button>
-        <div id="subsBlock" hidden>
-          <div class="limit-group-title">Похоже на подписки</div>
-          <p class="limits-help">Эти списания повторяются каждый месяц. Добавьте их в регулярные — бот будет напоминать.</p>
-          <div id="subsList" class="debts-list"></div>
+      </details>
+      <details class="pf-sec" id="recurringBlock" name="pf">
+        <summary><span class="pf-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 0 1 14-5l2-2v6h-6l2-2a5 5 0 1 0 1 6"/></svg></span><span class="pf-sum"><b>Регулярные платежи</b><small id="recSum">Кредиты, коммуналка, подписки</small></span><i class="pf-chev" aria-hidden="true"></i></summary>
+        <div class="pf-body">
+          <div id="recurringList" class="recurring-list"></div>
+          <button type="button" class="secondary-button" id="recurringAdd">+ Добавить платёж</button>
+          <div id="subsBlock" hidden>
+            <div class="limit-group-title">Похоже на подписки</div>
+            <div id="subsList" class="debts-list"></div>
+          </div>
         </div>
-      </div>
-
-      <div>
-        <h3 class="profile-section-title">Импорт выписки Kaspi</h3>
-        <p class="limits-help">Загрузите PDF-выписку Kaspi Gold — покупки попадут в бюджет с категориями. Файл разбирается прямо в браузере.</p>
-        <button type="button" class="secondary-button" id="importOpen">Загрузить выписку</button>
-      </div>
-
-      <div>
-        <h3 class="profile-section-title">Лимиты</h3>
-        <p class="limits-help">Трату можно записать и сверх лимита — он просто уйдёт в минус, а бот предупредит. Неделя начинается в понедельник.</p>
-      </div>
-
-      <div class="limit-tabs">
-        <div class="group-toggle" id="limitScope" role="tablist" aria-label="Чьи лимиты">
-          <button type="button" data-scope="family" class="selected">Семья <em></em></button>
-          <button type="button" data-scope="me">Только мои <em></em></button>
+      </details>
+      <details class="pf-sec" id="roundupSec" name="pf">
+        <summary><span class="pf-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11a7 6 0 0 1 13-2h2v4l-2 1v3h-3v-2H9v2H6v-3a6 6 0 0 1-1-3zM14 9h.01"/></svg></span><span class="pf-sum"><b>Копилка-округление</b><small id="roundupSum">Выкл</small></span><i class="pf-chev" aria-hidden="true"></i></summary>
+        <div class="pf-body">
+          <p class="pf-note">Каждая трата округляется вверх, разница откладывается в цель. Например, 4 300 ₸ → 700 ₸ в копилку.</p>
+          <label class="pf-field">Цель<select id="roundupGoal"></select></label>
+          <div class="group-toggle four" id="roundupStep">
+            <button type="button" data-step="100">100</button><button type="button" data-step="500">500</button><button type="button" data-step="1000">1 000</button><button type="button" data-step="5000">5 000</button>
+          </div>
         </div>
-        <div class="group-toggle" id="limitPeriod" role="tablist" aria-label="Период">
-          <button type="button" data-period="month" class="selected">Месяц <em></em></button>
-          <button type="button" data-period="week">Неделя <em></em></button>
+      </details>
+      <details class="pf-sec" id="siriSec" name="pf">
+        <summary><span class="pf-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM6 11a6 6 0 0 0 12 0M12 17v4"/></svg></span><span class="pf-sum"><b>Siri и виджет</b><small id="siriSum">Голосовой ввод, остаток на экране</small></span><i class="pf-chev" aria-hidden="true"></i></summary>
+        <div class="pf-body">
+          <button type="button" class="secondary-button" id="siriSetup">Получить личную ссылку</button>
+          <div class="siri-box" id="siriBox" hidden>
+            <div class="siri-url" id="siriUrl"></div>
+            <div class="siri-actions">
+              <button type="button" class="secondary-button small" id="siriCopy">Скопировать</button>
+              <button type="button" class="text-button" id="siriRenew">Новая ссылка</button>
+            </div>
+            <details class="pf-sub"><summary>Siri: «Привет, Siri, трата»</summary>
+              <ol class="siri-steps">
+                <li>«Команды» → «+», имя «Трата».</li>
+                <li>Действие «Диктовать текст».</li>
+                <li>«Получить содержимое URL»: ссылка выше, метод POST, тело — Форма, поле <b>text</b> = продиктованный текст.</li>
+                <li>«Показать результат».</li>
+              </ol>
+            </details>
+            <details class="pf-sub"><summary>Остаток на экране «Домой»</summary>
+              <ol class="siri-steps">
+                <li>Установите бесплатное приложение Scriptable.</li>
+                <li>Создайте скрипт и вставьте код (кнопка ниже).</li>
+                <li>Добавьте виджет Scriptable на экран и выберите этот скрипт.</li>
+              </ol>
+              <button type="button" class="secondary-button small" id="widgetCopy">Скопировать код виджета</button>
+            </details>
+          </div>
+          <p class="pf-note">Голосовые боту тоже работают: «такси две тысячи».</p>
         </div>
-        <p class="limit-scope-hint" id="limitScopeHint"></p>
-      </div>
-
-      <div id="limitsForm" class="limit-form"><div class="loading-placeholder"><div class="spinner"></div></div></div>
-      <button type="button" class="custom-cat-btn" id="limitsAddCat">+ Новая категория</button>
-
-      <h3 class="profile-section-title">Настройки лимитов</h3>
-      <label class="switch-row">
-        <span><b>Переносить остаток</b><small>Неистраченное прибавится к лимиту следующего периода, перерасход — вычтется из него.</small></span>
-        <input type="checkbox" id="rolloverToggle" role="switch">
-        <i class="switch" aria-hidden="true"></i>
-      </label>
-      <div class="field-label">Предупреждать, когда осталось меньше</div>
-      <div class="group-toggle" id="warnToggle"></div>
-
-      <button class="sheet-submit" id="limitsSave" type="button" disabled>Сохранить лимиты</button>
+      </details>
+      <details class="pf-sec" id="importSec" name="pf">
+        <summary><span class="pf-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg></span><span class="pf-sum"><b>Импорт выписки</b><small id="importSum">Kaspi Gold, PDF</small></span><i class="pf-chev" aria-hidden="true"></i></summary>
+        <div class="pf-body">
+          <p class="pf-note">PDF-выписка Kaspi Gold разбирается прямо в браузере. Проще — прислать её боту.</p>
+          <button type="button" class="secondary-button" id="importOpen">Загрузить выписку</button>
+        </div>
+      </details>
+      <details class="pf-sec" id="themeSec" name="pf">
+        <summary><span class="pf-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg></span><span class="pf-sum"><b>Оформление</b><small id="themeSum">Авто</small></span><i class="pf-chev" aria-hidden="true"></i></summary>
+        <div class="pf-body">
+          <div class="group-toggle three" id="themeToggle">
+            <button type="button" data-theme-choice="auto">Авто</button>
+            <button type="button" data-theme-choice="light">Светлая</button>
+            <button type="button" data-theme-choice="dark">Тёмная</button>
+          </div>
+        </div>
+      </details>
+      <details class="pf-sec danger" id="resetSec" name="pf">
+        <summary><span class="pf-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg></span><span class="pf-sum"><b>Сброс данных</b><small id="resetSum">После подтверждения обоими</small></span><i class="pf-chev" aria-hidden="true"></i></summary>
+        <div class="pf-body">
       <div class="danger-zone">
-        <h3 class="profile-section-title">Сброс данных</h3>
-        <p class="limits-help">Удалит операции, лимиты, цели, платежи, долги и депозиты. Сработает только после подтверждения обоими в Telegram; перед сбросом бот сделает резервную копию.</p>
+                <p class="limits-help">Удалит операции, лимиты, цели, платежи, долги и депозиты. Сработает только после подтверждения обоими в Telegram; перед сбросом бот сделает резервную копию.</p>
         <div class="reset-status" id="resetStatus" hidden></div>
         <button type="button" class="danger-button" id="resetRequest">Сбросить все данные</button>
+      </div>
+        </div>
+      </details>
       </div>
       <?php if (!$localDev): ?><a href="logout.php" class="profile-logout" id="profileLogout">Выйти из аккаунта</a><?php endif; ?>
     </div>
@@ -548,6 +600,7 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       <label>Название<input id="goalTitle" maxlength="60" placeholder="Например, Отпуск" autocomplete="off"></label>
       <label>Сколько нужно, ₸<input id="goalTarget" inputmode="numeric" placeholder="600 000" autocomplete="off"></label>
       <label>К какой дате <span class="optional">необязательно</span><input id="goalDeadline" type="date"></label>
+      <label>Взнос в месяц, ₸ <span class="optional">бот напомнит 1-го и 20-го</span><input id="goalMonthly" inputmode="numeric" placeholder="50 000" autocomplete="off"></label>
       <button id="goalSave" class="sheet-submit" type="button">Сохранить</button>
       <button id="goalCloseBtn" class="sheet-delete" type="button" hidden>Закрыть цель и вернуть деньги в бюджет</button>
     </div>
@@ -873,6 +926,58 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
     <div class="sheet-body">
       <p class="limits-help">Удалённые операции и переводы хранятся 30 дней — их можно вернуть.</p>
       <div id="trashList" class="journal"></div>
+    </div>
+  </div>
+</div>
+
+<div class="cal-modal" id="catPdfModal" hidden>
+  <div class="cal-backdrop" data-catpdf-close></div>
+  <div class="cal-content small" role="dialog" aria-labelledby="catPdfTitle">
+    <div class="cal-header"><div id="catPdfTitle">Расходы по категориям</div><button class="sheet-close" data-catpdf-close aria-label="Закрыть">×</button></div>
+    <div class="cat-form">
+      <p class="pf-note">PDF со списком операций по выбранным категориям за год — для налогового вычета, гарантии или крупных покупок. Бот пришлёт файл.</p>
+      <label class="pf-field">Год<select id="catPdfYear"></select></label>
+      <div class="chip-checks" id="catPdfCats"></div>
+      <button id="catPdfSend" class="sheet-submit" type="button">Прислать PDF в Telegram</button>
+    </div>
+  </div>
+</div>
+
+<div class="cal-modal" id="photoModal" hidden>
+  <div class="cal-backdrop" data-photo-close></div>
+  <div class="cal-content photo-view" role="dialog" aria-label="Фото чека">
+    <div class="cal-header"><div>Фото чека</div><button class="sheet-close" data-photo-close aria-label="Закрыть">×</button></div>
+    <img id="photoFull" alt="Фото чека">
+  </div>
+</div>
+
+<div class="sheet" id="tripsSheet" hidden>
+  <div class="sheet-backdrop" data-layer-close></div>
+  <div class="sheet-content" role="dialog" aria-labelledby="tripsTitle">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header"><h2 id="tripsTitle">Поездки</h2><button class="sheet-close" data-layer-close aria-label="Закрыть">×</button></div>
+    <div class="sheet-body">
+      <div id="tripActive"></div>
+      <div id="tripsPast"></div>
+      <button type="button" class="sheet-submit" id="tripNew">+ Новая поездка</button>
+      <p class="pf-note">Пока поездка идёт, траты в приложении и в боте сразу пишутся в её валюте и попадают в её бюджет. «Кафе 20» в боте = 20 в валюте поездки, «20 тенге» — в тенге.</p>
+    </div>
+  </div>
+</div>
+
+<div class="cal-modal" id="tripModal" hidden>
+  <div class="cal-backdrop" data-trip-close></div>
+  <div class="cal-content small" role="dialog" aria-labelledby="tripModalTitle">
+    <div class="cal-header"><div id="tripModalTitle">Новая поездка</div><button class="sheet-close" data-trip-close aria-label="Закрыть">×</button></div>
+    <div class="cat-form">
+      <label>Куда<input id="tripTitle" maxlength="80" placeholder="Например, Стамбул" autocomplete="off"></label>
+      <div class="field-label">Валюта</div>
+      <div class="group-toggle four" id="tripCurrency">
+        <button type="button" data-cur="KZT" class="selected">₸</button><button type="button" data-cur="USD">$</button><button type="button" data-cur="EUR">€</button><button type="button" data-cur="RUB">₽</button>
+      </div>
+      <label>Бюджет <span class="optional">необязательно</span><input id="tripBudget" inputmode="numeric" placeholder="1 000" autocomplete="off"></label>
+      <label>Начало<input id="tripStart" type="date"></label>
+      <button id="tripSave" class="sheet-submit" type="button">Начать поездку</button>
     </div>
   </div>
 </div>

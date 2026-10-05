@@ -63,7 +63,8 @@ function parse_entry_text(string $text): ?array {
   $amount = (float)(str_replace([' ', "\u{00A0}"], '', $m[1][0]) . (isset($m[2]) && $m[2][0] !== '' ? '.' . $m[2][0] : ''));
   if (isset($m[3]) && $m[3][0] !== '') $amount *= 1000;
   if ($amount <= 0 || $amount > 100000000) return null;
-  $consume('/(^|\s)(₸|тг|тенге|kzt)(?=\s|$)/u');
+  $explicitKzt = (bool)$consume('/(^|\s)(₸|тг|тенге|kzt)(?=\s|$)/u');
+  if ($currency === 'KZT' && !$explicitKzt && ($trip = trip_active()) && $trip['currency'] !== 'KZT') $currency = $trip['currency'];
   $t = trim(trim($t), '+-—:,. ');
   $orig = trim(trim($orig), '+-—:,. ');
   $topup = $plus || preg_match('/зарплат|пополн|доход|аванс|преми|кэшбэк|кешбэк|cashback/u', $t);
@@ -85,6 +86,8 @@ function bot_entry_text(array $e, string $who, string $head = '✅ Записа�
   $day = $e['date'] === date('Y-m-d') ? 'сегодня' : ($e['date'] === date('Y-m-d', strtotime('-1 day')) ? 'вчера' : $d->format('d.m.Y'));
   $text = "$head $kind: {$e['category']} $sign" . fmt_money((float)$e['amount']);
   if (!empty($e['orig_currency'])) $text .= ' (' . fmt_cur((float)$e['orig_amount'], $e['orig_currency']) . ' по курсу НБ РК)';
+  if (!empty($e['split'])) $text .= ' · ' . SPLIT_KINDS[$e['split']];
+  if (!empty($e['roundup'])) $text .= "\n🐷 +" . fmt_money((float)$e['roundup']) . ' в копилку';
   if (($e['note'] ?? '') !== '') $text .= "\n📝 " . $e['note'];
   return $text . "\n👤 $who · $day";
 }
@@ -162,6 +165,8 @@ function bot_save_entry(int $userId, array $raw): array {
   $key = isset($raw['key']) ? (string)$raw['key'] : null;
   if ($key !== null && receipt_exists($key)) throw new RuntimeException('Этот чек уже записан');
   $id = insert_transaction($userId, $e, null, $key);
+  trip_tag($id, $e);
+  $e['roundup'] = apply_roundup($id, $userId, $e);
   notify_big_expense(['id' => $userId, 'name' => user_label($userId)], $e);
   $limits = $e['kind'] === 'expense' ? check_limit_alerts($e['category'], $e['date'], ['id' => $userId, 'name' => user_label($userId)], (float)$e['amount']) : [];
   return ['id' => $id, 'entry' => $e, 'limits' => $limits];
@@ -292,7 +297,13 @@ function bot_handle_callback(array $cb): void {
           $tx = get_transaction((int)$p['tx']);
         }
         $e = ['kind' => $tx['kind'], 'amount' => (float)$tx['amount'], 'category' => $tx['category'], 'note' => $tx['note'], 'date' => $tx['occurred_on']];
-        $edit(bot_entry_text($e, user_label((int)$tx['telegram_id']), $opt === '__back' ? '✅ Записано' : '✏️ Категория изменена'), bot_tx_markup($userId, (int)$tx['id']));
+        $markup = bot_tx_markup($userId, (int)$tx['id']);
+        // Offer to remember the merchant so the next import gets it right
+        if ($opt !== '__back' && $tx['kind'] === 'expense' && mb_strlen(rule_key((string)$tx['note'])) >= 3) {
+          $rk = bot_keyboard($userId, ['type' => 'rule', 'note' => $tx['note'], 'category' => $tx['category'], 'opts' => ['save']], ['📌 Всегда «' . mb_substr(rule_key((string)$tx['note']), 0, 20) . '» → ' . $tx['category']], 1);
+          $markup['inline_keyboard'][] = $rk['inline_keyboard'][0];
+        }
+        $edit(bot_entry_text($e, user_label((int)$tx['telegram_id']), $opt === '__back' ? '✅ Записано' : '✏️ Категория изменена'), $markup);
         $answer($opt === '__back' ? '' : 'Готово');
         return;
       case 'statement':
@@ -348,6 +359,17 @@ function bot_handle_callback(array $cb): void {
         set_setting($key, (string)$p['amount']);
         $edit('✅ Проценты ' . fmt_money((float)$p['amount']) . ' записаны в журнал депозита');
         $answer('Записано');
+        return;
+      case 'rule':
+        $r = rule_save((string)$p['note'], (string)$p['category'], $userId);
+        $answer('Запомнил');
+        telegram('sendMessage', ['chat_id' => $chatId, 'text' => "📌 Теперь «{$r['pattern']}» всегда → {$p['category']}" . ($r['fixed'] ? "\nИсправил прошлых операций: {$r['fixed']}" : '')]);
+        return;
+      case 'goal_pay':
+        if ($opt === 'skip') { $edit('⏭ Напомню в следующий раз'); $answer(); return; }
+        goal_move((int)$p['id'], $p['amount'], ['id' => $userId]);
+        $edit('✅ Отложено ' . fmt_money((float)$p['amount']) . ' в цель');
+        $answer('Отложено');
         return;
       case 'shop':
         if ($opt === 'clear') { $done = shopping_clear_done(); $answer($done ? 'Убрал купленное' : 'Купленного нет'); }

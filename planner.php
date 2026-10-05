@@ -17,6 +17,7 @@ function planner_schema(PDO $pdo): void {
   if (!has_column($pdo, 'transactions', 'orig_amount')) $pdo->exec('ALTER TABLE transactions ADD COLUMN orig_amount DECIMAL(14,2) NULL');
   if (!has_column($pdo, 'transactions', 'orig_currency')) $pdo->exec('ALTER TABLE transactions ADD COLUMN orig_currency VARCHAR(3) NULL');
   if (!has_column($pdo, 'deposits', 'currency')) $pdo->exec("ALTER TABLE deposits ADD COLUMN currency VARCHAR(3) NOT NULL DEFAULT 'KZT'");
+  family_schema($pdo);
 }
 
 /* ========== CHANGE LOG AND TRASH ========== */

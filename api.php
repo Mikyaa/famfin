@@ -22,7 +22,7 @@ try {
     $month = range_summary($mFrom, $mUntil);
     [$wFrom, $wUntil] = normalize_period(null, null, 'week');
     $week = range_summary($wFrom, $wUntil);
-    $recent = db()->query("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,t.telegram_id,t.import_account account,t.orig_amount,t.orig_currency,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id ORDER BY t.occurred_on DESC,t.id DESC LIMIT 10")->fetchAll();
+    $recent = db()->query("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,t.telegram_id,t.import_account account,t.orig_amount,t.orig_currency,t.split,t.photo IS NOT NULL has_photo,t.trip_id,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id ORDER BY t.occurred_on DESC,t.id DESC LIMIT 10")->fetchAll();
     foreach ($recent as &$r) $r['group'] = category_group_of($r['category'], $r['cg'] ?: null);
     unset($r);
     json_out([
@@ -46,10 +46,62 @@ try {
       'shopping_left' => count(array_filter(shopping_list(), fn($i) => !$i['done'])),
       'plan' => plan_brief(),
       'fx' => fx_rates(),
+      'settlement' => settlement_status(),
+      'trip' => ($t = trip_active()) ? $t + trip_summary($t) : null,
+      'prefs' => ['digest' => digest_enabled((int)$member['id'])] + ['roundup' => roundup_settings()],
     ]);
   }
 
   /* ----- wave 3: log, trash, plan, calendar, subscriptions, shopping, Siri, year ----- */
+  /* ----- wave 4: split, photos, rules, compare, round-up, trips, category PDF ----- */
+  if ($method === 'POST' && $action === 'settle') { $s = settle_up((int)$member['id']); json_out(['ok' => true, 'settled' => $s, 'settlement' => settlement_status()]); }
+  if ($method === 'POST' && $action === 'photo') {
+    $d = json_decode(file_get_contents('php://input'), true) ?: [];
+    if (!empty($d['remove'])) photo_remove((int)($d['id'] ?? 0)); else photo_save((int)($d['id'] ?? 0), (string)($d['data'] ?? ''));
+    json_out(['ok' => true]);
+  }
+  if ($method === 'GET' && $action === 'photo') {
+    $f = photo_file((int)($_GET['id'] ?? 0));
+    if (!$f) json_out(['error' => 'Фото нет'], 404);
+    header('Content-Type: image/jpeg');
+    header('Cache-Control: private, max-age=86400');
+    header('Content-Length: ' . filesize($f));
+    readfile($f);
+    exit;
+  }
+  if ($method === 'GET' && $action === 'rules') { json_out(['items' => rules_list()]); }
+  if ($method === 'POST' && $action === 'rule_save') { $d = body(); $r = rule_save((string)($d['note'] ?? ''), (string)($d['category'] ?? ''), (int)$member['id']); json_out(['ok' => true] + $r + ['items' => rules_list()]); }
+  if ($method === 'POST' && $action === 'rule_delete') { rule_delete((string)(body()['pattern'] ?? '')); json_out(['ok' => true, 'items' => rules_list()]); }
+  if ($method === 'POST' && $action === 'prefs') {
+    $d = body();
+    if (isset($d['digest'])) set_setting('digest:' . (int)$member['id'], $d['digest'] ? '1' : '0');
+    if (isset($d['roundup_goal'])) { set_setting('roundup_goal', (string)(int)$d['roundup_goal']); set_setting('roundup_step', (string)(int)($d['roundup_step'] ?? 1000)); audit('settings', 'roundup', null, (int)$d['roundup_goal'] ? 'Копилка-округление включена' : 'Копилка-округление выключена'); }
+    json_out(['ok' => true, 'prefs' => ['digest' => digest_enabled((int)$member['id']), 'roundup' => roundup_settings()]]);
+  }
+  if ($method === 'GET' && $action === 'digest_preview') { json_out(['text' => digest_text((int)$member['id'])]); }
+  if ($method === 'GET' && $action === 'trips') { json_out(['items' => trips_list()]); }
+  if ($method === 'GET' && $action === 'trip_ops') {
+    $q = db()->prepare("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,t.telegram_id,t.orig_amount,t.orig_currency,t.split,t.photo IS NOT NULL has_photo,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id WHERE t.trip_id=? ORDER BY t.occurred_on DESC,t.id DESC LIMIT 300");
+    $q->execute([(int)($_GET['id'] ?? 0)]);
+    json_out(['items' => $q->fetchAll()]);
+  }
+  if ($method === 'POST' && $action === 'trip_save') { trip_save(body()); json_out(['ok' => true, 'items' => trips_list()]); }
+  if ($method === 'POST' && $action === 'trip_end') { trip_end((int)(body()['id'] ?? 0)); json_out(['ok' => true, 'items' => trips_list()]); }
+  if ($method === 'POST' && $action === 'trip_delete') { trip_delete((int)(body()['id'] ?? 0)); json_out(['ok' => true, 'items' => trips_list()]); }
+  if ($method === 'POST' && $action === 'export_categories') {
+    $d = body();
+    $y = (int)($d['year'] ?? date('Y'));
+    if ($y < 2000 || $y > (int)date('Y')) json_out(['error' => 'Неверный год'], 422);
+    $cats = is_array($d['categories'] ?? null) ? $d['categories'] : [];
+    $file = export_category_pdf("$y-01-01", ($y + 1) . '-01-01', $cats);
+    try {
+      $r = telegram_multipart('sendDocument', ['chat_id' => (string)$member['id'], 'caption' => "📎 Расходы по категориям за $y год: " . mb_substr(implode(', ', $cats), 0, 300),
+        'document' => new CURLFile($file, 'application/pdf', "rashody-$y.pdf")]);
+    } finally { @unlink($file); }
+    if (!($r['ok'] ?? false)) json_out(['error' => 'Не удалось отправить файл в Telegram'], 502);
+    json_out(['ok' => true]);
+  }
+
   if ($method === 'GET' && $action === 'audit') { json_out(['items' => audit_list()]); }
   if ($method === 'GET' && $action === 'trash') { json_out(['items' => trash_list()]); }
   if ($method === 'POST' && $action === 'trash_restore') { $s = trash_restore((int)(body()['id'] ?? 0)); json_out(['ok' => true, 'restored' => $s, 'items' => trash_list()]); }
@@ -192,7 +244,7 @@ try {
     $page = max(1, (int)($_GET['page'] ?? 1));
     $limit = min(200, max(10, (int)($_GET['limit'] ?? 50)));
     $offset = ($page - 1) * $limit;
-    $q = db()->prepare("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,t.telegram_id,t.import_account account,t.orig_amount,t.orig_currency,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id WHERE t.occurred_on>=? AND t.occurred_on<? ORDER BY t.occurred_on DESC,t.id DESC LIMIT $limit OFFSET $offset");
+    $q = db()->prepare("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,t.telegram_id,t.import_account account,t.orig_amount,t.orig_currency,t.split,t.photo IS NOT NULL has_photo,t.trip_id,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id WHERE t.occurred_on>=? AND t.occurred_on<? ORDER BY t.occurred_on DESC,t.id DESC LIMIT $limit OFFSET $offset");
     $q->execute([$from, $until]);
     $rows = $q->fetchAll();
     foreach ($rows as &$r) $r['group'] = category_group_of($r['category'], $r['cg'] ?: null);
@@ -209,6 +261,7 @@ try {
       'balances' => $balances,
       'daily' => $daily,
       'months' => months_series($until),
+      'compare' => report_compare($from, $until),
       'transactions' => $rows,
       'pagination' => ['page'=>$page,'limit'=>$limit,'total'=>$total,'pages'=>(int)ceil($total / $limit)],
       'category_groups' => category_groups_all(),
@@ -362,13 +415,15 @@ try {
   if ($method === 'POST' && $action === 'main') {
     $e = validate_entry(body());
     $id = insert_transaction((int)$member['id'], $e);
+    trip_tag($id, $e);
+    $roundup = apply_roundup($id, (int)$member['id'], $e);
     notify_big_expense($member, $e);
     // Limits never block a record; they only report where the family stands
     $limits = [];
     if ($e['kind'] === 'expense') {
       try { $limits = check_limit_alerts($e['category'], $e['date'], $member, (float)$e['amount']); } catch (Throwable $ex) { error_log((string)$ex); }
     }
-    json_out(['ok'=>true, 'id'=>$id, 'category_group'=>$e['group'], 'limits'=>$limits]);
+    json_out(['ok'=>true, 'id'=>$id, 'category_group'=>$e['group'], 'limits'=>$limits, 'roundup'=>$roundup]);
   }
 
   json_out(['error'=>'Not found'], 404);

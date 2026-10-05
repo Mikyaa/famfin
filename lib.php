@@ -888,4 +888,5 @@ require __DIR__ . '/features.php';
 require __DIR__ . '/bot.php';
 require __DIR__ . '/extras.php';
 require __DIR__ . '/planner.php';
+require __DIR__ . '/family.php';
 

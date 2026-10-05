@@ -15,6 +15,10 @@ if ($text === '') {
 }
 $userId = quick_user($token);
 if ($userId === null) { http_response_code(403); echo 'Ссылка недействительна. Возьмите новую в профиле бюджета.'; exit; }
+// Widget feed: quick.php?t=…&mode=summary (text) or mode=json (Scriptable widget)
+$mode = (string)($_GET['mode'] ?? '');
+if ($mode === 'json') { header('Content-Type: application/json; charset=utf-8'); echo json_encode(widget_feed(), JSON_UNESCAPED_UNICODE); exit; }
+if ($mode === 'summary') { echo widget_text(); exit; }
 if ($text === '' || mb_strlen($text) > 300) { http_response_code(422); echo 'Скажите, например: кафе пять тысяч'; exit; }
 set_actor($userId);
 try {

@@ -193,10 +193,15 @@ document.addEventListener('touchstart', e => {
 }, {passive: true});
 
 /* ========== CONFIRM MODAL ========== */
-function showConfirm(text){
+// Button labels follow the question: «Удалить …?» → «Удалить» / «Отмена»
+const CONFIRM_VERBS = {'Удалить': 'Удалить', 'Убрать': 'Убрать', 'Закрыть': 'Закрыть', 'Завершить': 'Завершить', 'Записать': 'Записать', 'Всегда': 'Запомнить', 'Сбросить': 'Сбросить'};
+function showConfirm(text, okLabel = null){
   return new Promise(resolve => {
     const modal = $('#confirmModal');
     $('#confirmText').textContent = text;
+    const unsaved = /^(Данные|Изменения) не сохранены/.test(text);
+    $('#confirmOk').textContent = okLabel || (unsaved ? 'Выйти' : CONFIRM_VERBS[text.split(/[\s,]/)[0]] || 'Продолжить');
+    $('#confirmCancel').textContent = unsaved ? 'Остаться' : 'Отмена';
     modal.hidden = false;
     const ok = $('#confirmOk');
     const cancel = $('#confirmCancel');
@@ -284,7 +289,7 @@ function animateClose(el, animClass = 'closing'){
 }
 
 /* ========== SHEET: ENTRY (add, edit, transfer) ========== */
-const sheetState = {mode:'add', editId:null, kind:'expense', amount:'', category:null, group:'variable', date:todayISO(), dateMode:'today', note:'', payerId:null, from:null, to:null, account:'', currency:'KZT'};
+const sheetState = {mode:'add', editId:null, kind:'expense', amount:'', category:null, group:'variable', date:todayISO(), dateMode:'today', note:'', payerId:null, from:null, to:null, account:'', currency:'KZT', split:'', photoData:null, hasPhoto:false, prevCategory:null};
 // Foreign amounts are converted at the National Bank rate on the server; the sheet shows the estimate
 const FX_ORDER = ['KZT', 'USD', 'EUR', 'RUB'];
 const fxRate = c => c === 'KZT' ? 1 : Number(mainCache?.fx?.[c] || 0);
@@ -353,6 +358,8 @@ function applyKindUI(){
   $('#payerRow').hidden = sheetState.mode !== 'edit';
   if (k === 'transfer' && sheetState.currency !== 'KZT') { sheetState.currency = 'KZT'; $('#sheetCurrency').textContent = cur('KZT'); updateFxHint(); }
   $('#sheetCurrency').classList.toggle('locked', k === 'transfer');
+  $('#splitField').hidden = k !== 'expense' || familyMembers().length < 2;
+  $('#photoRow').hidden = k === 'transfer';
   $('#noteInput').placeholder = k === 'transfer' ? 'Например, на продукты' : 'Например, продукты на неделю';
   updateLimitHint();
 }
@@ -375,7 +382,14 @@ function openSheet(tx = null){
     from: myId(), to: other ? other.id : null,
     account: tx ? (tx.account || '') : (() => { try { const last = localStorage.getItem('fb_last_account') || ''; return accountsCache.some(a => a.name === last) ? last : ''; } catch { return ''; } })(),
   });
-  sheetState.currency = tx?.orig_currency || 'KZT';
+  sheetState.currency = tx?.orig_currency || (!tx && mainCache?.trip ? mainCache.trip.currency : 'KZT');
+  if (!fxRate(sheetState.currency)) sheetState.currency = 'KZT';
+  sheetState.split = tx?.split || '';
+  sheetState.photoData = null;
+  sheetState.hasPhoto = Boolean(tx && Number(tx.has_photo));
+  sheetState.prevCategory = tx ? tx.category : null;
+  renderSplit();
+  renderPhotoRow(tx);
   if (tx?.orig_currency) sheetState.amount = String(Number(tx.orig_amount));
   $('#sheetTitle').textContent = tx ? 'Изменить запись' : 'Новая запись';
   $('#noteInput').value = sheetState.note;
@@ -574,7 +588,7 @@ async function submitEntry(){
     okText = 'Перевод записан ✓';
   } else {
     if (!sheetState.category) { haptic('error'); notice('Выберите категорию'); return; }
-    body = {kind: sheetState.kind, amount, category: sheetState.category, category_group: sheetState.group, note, date: sheetState.date, account: sheetState.account || '', currency: sheetState.currency};
+    body = {kind: sheetState.kind, amount, category: sheetState.category, category_group: sheetState.group, note, date: sheetState.date, account: sheetState.account || '', currency: sheetState.currency, split: sheetState.kind === 'expense' ? sheetState.split : ''};
     if (sheetState.mode === 'edit') { url = 'api.php?action=update'; body.id = sheetState.editId; body.payer_id = sheetState.payerId; okText = 'Изменения сохранены ✓'; }
     else { url = 'api.php'; okText = 'Запись добавлена ✓'; }
   }
@@ -584,12 +598,20 @@ async function submitEntry(){
   tgMain.progress(true);
   try {
     const saved = await request(url, {method:'POST', body: JSON.stringify(body)});
+    const txId = sheetState.mode === 'edit' ? sheetState.editId : saved.id;
+    if (sheetState.photoData && txId) {
+      try { await request('api.php?action=photo', {method: 'POST', body: JSON.stringify({id: txId, data: sheetState.photoData})}); }
+      catch(e) { notice('Запись сохранена, но фото не загрузилось: ' + e.message); }
+    }
+    if (saved.roundup) okText = okText.replace(' ✓', '') + ` · 🐷 +${money(saved.roundup)} ${cur(currency)} в копилку ✓`;
+    const ruleOffer = sheetState.mode === 'edit' && sheetState.kind === 'expense' && sheetState.prevCategory && sheetState.prevCategory !== sheetState.category && /\p{L}{3,}/u.test(note) ? {note, category: sheetState.category} : null;
     const limitMsg = limitNoticeAfterSave(saved.limits);
     if (limitMsg) { haptic('warning'); notice(okText.replace(' ✓', '') + '. ' + limitMsg, 'warn'); }
     else { haptic('success'); notice(okText, true); }
     await closeSheet(true);
     if (afterSaveHook) { const h = afterSaveHook; afterSaveHook = null; await h().catch(() => {}); }
     await reloadAfterChange();
+    if (ruleOffer) offerRule(ruleOffer);
   } catch(e) { haptic('error'); notice(e.message); }
   finally {
     submitting = false;
@@ -637,7 +659,7 @@ function txRowHtml(t){
     <i class="tx-icon ${t.kind}">${t.kind==='topup'?'↗':'↘'}</i>
     <div class="tx-main">
       <div class="tx-title">${safe(t.category)}${t.note?' · '+safe(t.note):''}</div>
-      <div class="tx-meta">${safe(t.display_name)} · ${t.orig_currency ? fmtCur(t.orig_amount, t.orig_currency) : t.kind==='topup' ? 'пополнение' : t.group==='fixed'?'обязательные':'переменные'}</div>
+      <div class="tx-meta">${safe(t.display_name)} · ${t.orig_currency ? fmtCur(t.orig_amount, t.orig_currency) : t.kind==='topup' ? 'пополнение' : t.group==='fixed'?'обязательные':'переменные'}${t.split ? ` · <span class="tx-tag">${t.split === 'half' ? '½ пополам' : 'за другого'}</span>` : ''}${Number(t.has_photo) ? ' · 📎' : ''}</div>
     </div>
     <b class="tx-amount ${t.kind}">${t.kind==='expense'?'−':'+'}${money(t.amount)}</b>
     <button class="tx-delete" aria-label="Удалить" data-delete="${t.id}">×</button>
@@ -762,6 +784,9 @@ async function loadMain(){
     renderAccounts(d.accounts);
     renderCapital(d);
     renderShopTile(d.shopping_left || 0);
+    renderSettlement(d.settlement);
+    renderTripCard(d.trip);
+    renderPrefs(d.prefs);
     renderPlanTile(d.plan || {});
     renderSettings(d.settings);
     renderResetStatus(d.reset);
@@ -859,6 +884,7 @@ $('#periodNext').onclick = () => shiftPeriod(1);
 function renderReport(d){
   reportCache = d;
   $('#yearSend').hidden = reportState.preset !== 'year';
+  renderCompare(d.compare);
   $('#yearSend').dataset.year = (d.from || todayISO()).slice(0, 4);
   categoryGroups = d.category_groups || categoryGroups;
   currency = d.summary.currency;
@@ -1280,6 +1306,10 @@ async function openProfile(scrollTo = null){
   applyTheme();
   loadRecurringList();
   loadSubscriptions();
+  // Sections start folded; the one asked for opens
+  $$('#profileSheet .pf-sec').forEach(d => { d.open = d.id === scrollTo; });
+  $('#digestBox').hidden = true;
+  updateProfileSums();
   if (typeof scrollTo === 'string') setTimeout(() => $('#' + scrollTo)?.scrollIntoView({behavior: 'smooth', block: 'start'}), 250);
   try {
     renderProfile(await request('api.php?action=limits'));
@@ -1287,6 +1317,8 @@ async function openProfile(scrollTo = null){
 }
 
 function renderProfile(d){
+  const fam = d.limits.filter(l => l.scope === 'family').length, mine = d.limits.length - fam;
+  $('#limitsSum').textContent = d.limits.length ? [fam && `семейных ${fam}`, mine && `моих ${mine}`].filter(Boolean).join(' · ') : 'Не заданы';
   const values = {'family|month': {}, 'family|week': {}, 'me|month': {}, 'me|week': {}};
   d.limits.forEach(l => { values[`${l.scope}|${l.period}`][l.category] = String(Math.round(l.amount)); });
   const groups = {fixed: [], variable: []};
@@ -1378,7 +1410,7 @@ async function closeProfile(force = false){
 }
 
 $('#avatar').onclick = () => openProfile();
-$('#limitsEdit').onclick = () => openProfile();
+$('#limitsEdit').onclick = () => openProfile('limitsSec');
 $('#limitsSave').onclick = saveProfile;
 $('#limitsAddCat').onclick = () => openCustomCatModal('profile');
 $$('#profileSheet [data-profile-close]').forEach(el => el.onclick = () => closeProfile());
@@ -1463,6 +1495,8 @@ function renderGoals(goals){
     let sub = g.left > 0 ? `осталось ${money(g.left)} ${c}` : 'цель достигнута 🎉';
     if (g.left > 0 && g.monthly_needed) sub += ` · по ${money(g.monthly_needed)} ${c} в месяц`;
     if (g.deadline) sub += ` · до ${fmtDate(g.deadline)}`;
+    const people = (g.by || []).filter(x => x.amount > 0).map(x => `${safe(x.name)} ${money(x.amount)}`).join(' · ');
+    const plan = g.monthly_plan && g.left > 0 ? `<div class="goal-plan ${g.this_month >= g.monthly_plan ? 'done' : ''}">В этом месяце ${money(g.this_month)} из ${money(g.monthly_plan)} ${c}</div>` : '';
     return `<article class="goal card" data-goal="${g.id}">
       <button type="button" class="goal-head" data-goal-edit="${g.id}" aria-label="Изменить цель ${safe(g.title)}">
         <span class="goal-title">${safe(g.title)}</span>
@@ -1470,6 +1504,7 @@ function renderGoals(goals){
       </button>
       <div class="limit-track"><i style="width:${g.percent}%"></i></div>
       <div class="goal-sub">${sub}</div>
+      ${people && (g.by || []).length > 1 ? `<div class="goal-people">${people}</div>` : ''}${plan}
       <div class="goal-actions">
         <button type="button" class="pill-button" data-goal-move="${g.id}" data-dir="1">Отложить</button>
         <button type="button" class="pill-button ghost" data-goal-move="${g.id}" data-dir="-1" ${g.saved > 0 ? '' : 'disabled'}>Забрать</button>
@@ -1487,16 +1522,17 @@ function openGoalModal(goal = null){
   $('#goalTitle').value = goal ? goal.title : '';
   $('#goalTarget').value = goal ? money(goal.target) : '';
   $('#goalDeadline').value = goal?.deadline || '';
+  $('#goalMonthly').value = goal?.monthly_plan ? money(goal.monthly_plan) : '';
   $('#goalCloseBtn').hidden = !goal;
   $('#goalModal').hidden = false;
   if (!goal) setTimeout(() => $('#goalTitle').focus(), 100);
 }
 const closeGoalModal = () => { $('#goalModal').hidden = true; };
 $$('#goalModal [data-goal-close]').forEach(el => el.onclick = closeGoalModal);
-$('#goalTarget').oninput = e => { const v = digitsOnly(e.target.value); e.target.value = v ? money(Number(v)) : ''; };
+$('#goalTarget').oninput = $('#goalMonthly').oninput = e => { const v = digitsOnly(e.target.value); e.target.value = v ? money(Number(v)) : ''; };
 $('#goalSave').onclick = async () => {
   try {
-    await request('api.php?action=goal_save', {method:'POST', body: JSON.stringify({id: goalEditing?.id, title: $('#goalTitle').value, target: digitsOnly($('#goalTarget').value), deadline: $('#goalDeadline').value})});
+    await request('api.php?action=goal_save', {method:'POST', body: JSON.stringify({id: goalEditing?.id, title: $('#goalTitle').value, target: digitsOnly($('#goalTarget').value), deadline: $('#goalDeadline').value, monthly: digitsOnly($('#goalMonthly').value)})});
     haptic('success'); notice('Цель сохранена ✓', true); closeGoalModal(); await reloadAfterChange();
   } catch(e) { haptic('error'); notice(e.message); }
 };
@@ -1579,6 +1615,7 @@ async function loadRecurringList(){
 }
 function renderRecurringList(items){
   const c = cur(currency);
+  $('#recSum').textContent = items.length ? `${items.length} ${plural(items.length, 'платёж', 'платежа', 'платежей')} · ${money(items.filter(r => r.active).reduce((s, r) => s + Number(r.amount), 0))} ${c} в месяц` : 'Кредиты, коммуналка, подписки';
   $('#recurringList').innerHTML = items.length ? items.map(r => `
     <button type="button" class="recurring-row ${r.active ? '' : 'paused'}" data-rec="${r.id}">
       <span class="recurring-main"><b>${safe(r.category)}${r.note ? ' · ' + safe(r.note) : ''}</b><small>${r.day}-го числа · ${safe(r.payer_name)}${r.active ? '' : ' · на паузе'}</small></span>
@@ -2096,7 +2133,8 @@ function renderCats(items){
       <span class="debt-row-main"><b><i class="dot-mark ${x.group}"></i> ${safe(x.name)}</b><small>${x.count ? `${x.count} ${plural(x.count, 'операция', 'операции', 'операций')} · ${money(x.total)} ${c}` : 'операций нет'}</small></span>
       <i class="drill-arrow">›</i>
     </button>`).join('');
-  $('#catsList').innerHTML = group('fixed', 'Обязательные') + group('variable', 'Переменные');
+  $('#catsList').innerHTML = group('fixed', 'Обязательные') + group('variable', 'Переменные') + '<div id="rulesBlock"></div>';
+  loadRules();
   $$('#catsList [data-cat]').forEach(b => b.onclick = () => openCatEdit(catsCache.find(x => x.name === b.dataset.cat)));
 }
 function openCatEdit(cat){
@@ -2440,9 +2478,276 @@ $('#yearSend').onclick = async () => {
   finally { b.disabled = false; }
 };
 
+/* ========== SPLIT EXPENSES ========== */
+function renderSplit(){
+  $$('#splitToggle button').forEach(b => b.classList.toggle('selected', b.dataset.split === sheetState.split));
+}
+$$('#splitToggle button').forEach(b => b.onclick = () => { sheetState.split = b.dataset.split; haptic('select'); renderSplit(); });
+
+function renderSettlement(s){
+  const el = $('#settleCard');
+  if (!s || !s.amount) { el.hidden = true; return; }
+  const c = cur(currency);
+  el.innerHTML = `<div class="settle-main"><span>Общие траты</span><b>${safe(s.from_name)} → ${safe(s.to_name)} ${money(s.amount)} ${c}</b></div>
+    <button type="button" class="pill-button" id="settleBtn">Рассчитаться</button>`;
+  el.hidden = false;
+  $('#settleBtn').onclick = async () => {
+    if (!(await showConfirm(`Записать перевод ${s.from_name} → ${s.to_name} на ${money(s.amount)} ${c}? Личные остатки пересчитаются.`))) return;
+    try { await request('api.php?action=settle', {method: 'POST', body: '{}'}); haptic('success'); notice('Рассчитались ✓', true); await reloadAfterChange(); }
+    catch(e) { haptic('error'); notice(e.message); }
+  };
+}
+
+/* ========== RECEIPT PHOTOS ========== */
+// Photos come through api.php with the Telegram auth header, so they are fetched as blobs
+async function photoUrl(id){
+  const r = await fetch('api.php?action=photo&id=' + id, {headers: headers(), credentials: 'same-origin'});
+  if (!r.ok) throw Error('Фото не найдено');
+  return URL.createObjectURL(await r.blob());
+}
+function renderPhotoRow(tx){
+  const thumb = $('#photoThumb'), img = $('#photoThumbImg');
+  if (img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+  img.removeAttribute('src');
+  thumb.hidden = true; $('#photoRemove').hidden = true;
+  $('.photo-pick span').textContent = '📎 Фото чека';
+  if (tx && Number(tx.has_photo)) photoUrl(tx.id).then(u => { img.src = u; thumb.hidden = false; $('#photoRemove').hidden = false; $('.photo-pick span').textContent = '📎 Заменить'; }).catch(() => {});
+}
+// Shrunk on the phone before upload (max 1600 px, JPEG)
+function shrinkImage(file){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, 1600 / Math.max(img.width, img.height));
+      const cv = document.createElement('canvas');
+      cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      URL.revokeObjectURL(img.src);
+      resolve(cv.toDataURL('image/jpeg', 0.82));
+    };
+    img.onerror = () => reject(Error('Не удалось открыть фото'));
+    img.src = URL.createObjectURL(file);
+  });
+}
+$('#photoInput').onchange = async e => {
+  const f = e.target.files?.[0];
+  e.target.value = '';
+  if (!f) return;
+  try {
+    sheetState.photoData = await shrinkImage(f);
+    $('#photoThumbImg').src = sheetState.photoData;
+    $('#photoThumb').hidden = false; $('#photoRemove').hidden = false;
+    $('.photo-pick span').textContent = '📎 Заменить';
+    haptic('light');
+  } catch(err) { notice(err.message); }
+};
+$('#photoRemove').onclick = async () => {
+  if (sheetState.photoData && !sheetState.hasPhoto) { sheetState.photoData = null; renderPhotoRow(null); return; }
+  if (!(await showConfirm('Убрать фото чека из этой записи?'))) return;
+  try {
+    await request('api.php?action=photo', {method: 'POST', body: JSON.stringify({id: sheetState.editId, remove: true})});
+    sheetState.photoData = null; sheetState.hasPhoto = false; renderPhotoRow(null); notice('Фото убрано', true);
+  } catch(e) { notice(e.message); }
+};
+$('#photoThumb').onclick = () => { $('#photoFull').src = $('#photoThumbImg').src; $('#photoModal').hidden = false; };
+$$('#photoModal [data-photo-close]').forEach(el => el.onclick = () => { $('#photoModal').hidden = true; });
+
+/* ========== MERCHANT RULES ========== */
+async function offerRule({note, category}){
+  if (!(await showConfirm(`Всегда относить «${note}» к категории «${category}»? Прошлые такие операции тоже исправлю.`))) return;
+  try {
+    const r = await request('api.php?action=rule_save', {method: 'POST', body: JSON.stringify({note, category})});
+    notice(`Запомнил: «${r.pattern}» → ${category}${r.fixed ? ` · исправлено ${r.fixed}` : ''} ✓`, true);
+    if (r.fixed) reloadAfterChange().catch(() => {});
+  } catch(e) { notice(e.message); }
+}
+async function loadRules(){
+  try {
+    const d = await request('api.php?action=rules');
+    const el = $('#rulesBlock');
+    if (!el) return;
+    el.innerHTML = d.items.length ? `<details class="fold rules-fold"><summary><span><b>Правила магазинов</b><small>${d.items.length} ${plural(d.items.length, 'правило', 'правила', 'правил')} — магазин всегда в своей категории</small></span><i class="pf-chev" aria-hidden="true"></i></summary>
+      ${d.items.map(r => `<div class="journal-row"><span class="journal-main"><b>${safe(r.pattern)}</b><small>→ ${safe(r.category)}</small></span><button type="button" class="tx-delete" data-rule="${safe(r.pattern)}" aria-label="Удалить правило">×</button></div>`).join('')}</details>`
+      : '<p class="pf-note">Смените категорию у операции с названием магазина — приложение предложит запомнить правило.</p>';
+    $$('#rulesBlock [data-rule]').forEach(b => b.onclick = async () => {
+      try { await request('api.php?action=rule_delete', {method: 'POST', body: JSON.stringify({pattern: b.dataset.rule})}); loadRules(); } catch(e) { notice(e.message); }
+    });
+  } catch {}
+}
+
+/* ========== PROFILE: folding sections and preferences ========== */
+let prefs = {digest: false, roundup: {goal: 0, step: 1000}};
+// One open section at a time keeps the profile short
+$$('#profileSheet .pf-sec').forEach(d => d.addEventListener('toggle', () => {
+  if (d.open) $$('#profileSheet .pf-sec').forEach(o => { if (o !== d) o.open = false; });
+}));
+function updateProfileSums(){
+  const c = cur(currency);
+  const t = mainCache?.settings?.big_expense_threshold;
+  $('#notifySum').textContent = [t ? `крупная трата от ${money(t)} ${c}` : 'крупные траты выкл', prefs.digest ? 'сводка в 9:00' : ''].filter(Boolean).join(' · ');
+  $('#themeSum').textContent = {auto: 'Как в системе', light: 'Светлая', dark: 'Тёмная'}[themePref()] || 'Авто';
+  const g = (mainCache?.goals || []).find(x => x.id === prefs.roundup.goal);
+  $('#roundupSum').textContent = g ? `до ${money(prefs.roundup.step)} ${c} → «${g.title}»` : 'Выкл';
+  $('#roundupSum').classList.toggle('on', Boolean(g));
+  if (mainCache?.recurring) renderRecurringSum(mainCache.recurring);
+}
+function renderRecurringSum(items){
+  $('#recSum').textContent = items.length ? `${items.length} ${plural(items.length, 'платёж', 'платежа', 'платежей')}` : 'Кредиты, коммуналка, подписки';
+}
+function renderPrefs(p){
+  if (p) prefs = p;
+  $('#digestToggle').checked = prefs.digest;
+  const goals = mainCache?.goals || [];
+  $('#roundupGoal').innerHTML = `<option value="0">Выключено</option>` + goals.map(g => `<option value="${g.id}" ${g.id === prefs.roundup.goal ? 'selected' : ''}>${safe(g.title)}</option>`).join('');
+  $('#roundupGoal').disabled = !goals.length;
+  $$('#roundupStep button').forEach(b => b.classList.toggle('selected', Number(b.dataset.step) === prefs.roundup.step));
+  updateProfileSums();
+}
+async function savePrefs(body){
+  try { const d = await request('api.php?action=prefs', {method: 'POST', body: JSON.stringify(body)}); prefs = d.prefs; renderPrefs(); haptic('light'); }
+  catch(e) { notice(e.message); renderPrefs(); }
+}
+$('#digestToggle').onchange = e => savePrefs({digest: e.target.checked});
+$('#digestPreview').onclick = async () => {
+  const box = $('#digestBox');
+  if (!box.hidden) { box.hidden = true; return; }
+  try { box.textContent = (await request('api.php?action=digest_preview')).text; box.hidden = false; } catch(e) { notice(e.message); }
+};
+$('#roundupGoal').onchange = e => savePrefs({roundup_goal: Number(e.target.value), roundup_step: prefs.roundup.step});
+$$('#roundupStep button').forEach(b => b.onclick = () => savePrefs({roundup_goal: prefs.roundup.goal, roundup_step: Number(b.dataset.step)}));
+$$('#themeToggle button').forEach(b => b.addEventListener('click', () => setTimeout(updateProfileSums, 0)));
+
+// Scriptable widget: reads the personal link with mode=json
+$('#widgetCopy').onclick = async () => {
+  const url = $('#siriUrl').textContent.trim();
+  if (!url) return;
+  const code = `// Семейный бюджет — виджет для Scriptable
+const r = await new Request(${JSON.stringify(url + '&mode=json')}).loadJSON();
+const fmt = n => Math.round(n).toLocaleString('ru-RU') + ' ₸';
+const w = new ListWidget();
+w.backgroundColor = new Color('#141B29');
+const t = w.addText('Семейный бюджет'); t.textColor = new Color('#A9B0BE'); t.font = Font.mediumSystemFont(12);
+w.addSpacer(6);
+const b = w.addText(fmt(r.balance)); b.textColor = Color.white(); b.font = Font.boldSystemFont(24); b.minimumScaleFactor = 0.6;
+w.addSpacer(4);
+const m = w.addText('За ' + r.month + ': ' + fmt(r.spent_month)); m.textColor = new Color('#A9B0BE'); m.font = Font.systemFont(12);
+if (r.plan_left !== null) { const p = w.addText('По плану: ' + fmt(r.plan_left)); p.textColor = new Color(r.plan_left < 0 ? '#FF6B6B' : '#5BD69A'); p.font = Font.systemFont(12); }
+w.addSpacer();
+const u = w.addText('обновлено ' + r.updated); u.textColor = new Color('#6E7584'); u.font = Font.systemFont(10);
+w.refreshAfterDate = new Date(Date.now() + 30 * 60 * 1000);
+Script.setWidget(w); Script.complete();`;
+  try { await navigator.clipboard.writeText(code); notice('Код виджета скопирован ✓', true); }
+  catch { notice('Не удалось скопировать — откройте профиль на сайте'); }
+};
+
+/* ========== COMPARISON WITH LAST YEAR ========== */
+function renderCompare(cmp){
+  const sec = $('#compareSection');
+  if (!cmp || (!cmp.yoy && !cmp.unusual?.length)) { sec.hidden = true; return; }
+  sec.hidden = false;
+  const c = cur(currency);
+  $('#unusualList').innerHTML = (cmp.unusual || []).slice(0, 3).map(u => `<div class="unusual"><b>⚠ ${safe(u.category)}</b><span>${money(u.now)} ${c} — в ${String(u.times).replace('.', ',')} раза больше обычного (${money(u.usual)} ${c})${u.early ? ', а месяц ещё не закончился' : ''}</span></div>`).join('');
+  const y = cmp.yoy;
+  $('#yoyFold').hidden = !y;
+  if (!y) return;
+  const d = y.now - y.before;
+  $('#yoySum').innerHTML = `${safe(y.label)}: ${money(y.before)} → ${money(y.now)} ${c} <span class="${d > 0 ? 'money-neg' : 'money-pos'}">${d > 0 ? '+' : '−'}${money(Math.abs(d))}</span>`;
+  $('#yoyList').innerHTML = y.rows.map(r => `<div class="journal-row"><span class="journal-main"><b>${safe(r.category)}</b><small>${money(r.before)} → ${money(r.now)} ${c}</small></span><b class="${r.diff > 0 ? 'money-neg' : 'money-pos'}">${r.diff > 0 ? '+' : '−'}${money(Math.abs(r.diff))}</b></div>`).join('');
+}
+
+/* ========== CATEGORY PDF ========== */
+$('#catPdfOpen').onclick = () => {
+  $('#exportMenu').hidden = true;
+  const y = new Date().getFullYear();
+  $('#catPdfYear').innerHTML = [y, y - 1, y - 2].map(v => `<option>${v}</option>`).join('');
+  const cats = [...(categoryGroups.fixed || []), ...(categoryGroups.variable || [])];
+  $('#catPdfCats').innerHTML = cats.map(cname => `<label class="chip-check"><input type="checkbox" value="${safe(cname)}" ${cname === 'Здоровье' ? 'checked' : ''}><span>${safe(cname)}</span></label>`).join('');
+  $('#catPdfModal').hidden = false;
+};
+$$('#catPdfModal [data-catpdf-close]').forEach(el => el.onclick = () => { $('#catPdfModal').hidden = true; });
+$('#catPdfSend').onclick = async () => {
+  const categories = $$('#catPdfCats input:checked').map(i => i.value);
+  if (!categories.length) { notice('Выберите категории'); return; }
+  const b = $('#catPdfSend'); b.disabled = true; b.textContent = 'Готовлю PDF…';
+  try {
+    await request('api.php?action=export_categories', {method: 'POST', body: JSON.stringify({year: Number($('#catPdfYear').value), categories})});
+    haptic('success'); notice('PDF отправлен вам в Telegram ✓', true); $('#catPdfModal').hidden = true;
+  } catch(e) { haptic('error'); notice(e.message); }
+  finally { b.disabled = false; b.textContent = 'Прислать PDF в Telegram'; }
+};
+
+/* ========== TRIPS ========== */
+let tripsCache = [], tripCur = 'KZT';
+function renderTripCard(t){
+  const el = $('#tripCard');
+  $('#tripTileSub').textContent = t ? `${t.title} · идёт` : 'Бюджет отпуска';
+  if (!t) { el.hidden = true; return; }
+  const share = t.budget ? Math.min(1, t.spent_cur / t.budget) : 0;
+  el.innerHTML = `<span class="trip-top"><b>✈️ ${safe(t.title)}</b><span>${fmtCur(t.spent_cur, t.currency)}${t.budget ? ' из ' + fmtCur(t.budget, t.currency) : ''}</span></span>
+    ${t.budget ? `<span class="plan-bar"><i class="${share >= 1 ? 'over' : share > .85 ? 'warn' : ''}" style="width:${Math.max(2, share * 100)}%"></i></span>` : ''}
+    <small>${t.days} ${plural(t.days, 'день', 'дня', 'дней')} · ${money(t.spent_kzt)} ₸ · в день ≈ ${money(t.per_day_kzt)} ₸</small>`;
+  el.hidden = false;
+}
+$('#tripCard').onclick = () => openTrips();
+$('#tripsOpen').onclick = () => openTrips();
+async function openTrips(){
+  openLayer('#tripsSheet');
+  $('#tripActive').innerHTML = '<div class="loading-placeholder"><div class="spinner"></div></div>';
+  try { tripsCache = (await request('api.php?action=trips')).items; renderTrips(); } catch(e) { $('#tripActive').innerHTML = `<div class="empty">${safe(e.message)}</div>`; }
+}
+function renderTrips(){
+  const active = tripsCache.find(t => Number(t.active));
+  const past = tripsCache.filter(t => !Number(t.active));
+  if (active) {
+    const t = active, budget = t.budget ? Number(t.budget) : 0, share = budget ? Math.min(1, t.spent_cur / budget) : 0;
+    $('#tripActive').innerHTML = `<div class="trip-panel card">
+      <div class="trip-top"><b>✈️ ${safe(t.title)}</b><span>с ${fmtDate(t.start_on)}</span></div>
+      <div class="trip-big">${fmtCur(t.spent_cur, t.currency)}${budget ? `<small> из ${fmtCur(budget, t.currency)}</small>` : ''}</div>
+      ${budget ? `<div class="plan-bar"><i class="${share >= 1 ? 'over' : share > .85 ? 'warn' : ''}" style="width:${Math.max(2, share * 100)}%"></i></div><small>${budget - t.spent_cur >= 0 ? 'осталось ' + fmtCur(budget - t.spent_cur, t.currency) : 'сверх бюджета ' + fmtCur(t.spent_cur - budget, t.currency)}</small>` : ''}
+      <div class="trip-stats"><span>${money(t.spent_kzt)} ₸</span><span>${t.count} оп.</span><span>≈ ${money(t.per_day_kzt)} ₸/день</span></div>
+      ${t.categories.length ? `<div class="journal">${t.categories.slice(0, 5).map(x => `<div class="journal-row"><span class="journal-main"><b>${safe(x.category)}</b></span><b>${money(x.total)} ₸</b></div>`).join('')}</div>` : '<p class="pf-note">Трат в поездке пока нет — нажмите «+» или напишите боту «кафе 20».</p>'}
+      <div class="trip-actions"><button type="button" class="secondary-button small" data-trip-ops="${t.id}">Операции</button><button type="button" class="secondary-button small" id="tripEnd">Завершить</button></div>
+      <div id="tripOps"></div>
+    </div>`;
+    $('#tripEnd').onclick = async () => {
+      if (!(await showConfirm(`Завершить поездку «${t.title}»? Новые траты снова будут в тенге.`))) return;
+      try { tripsCache = (await request('api.php?action=trip_end', {method: 'POST', body: JSON.stringify({id: t.id})})).items; renderTrips(); mainCache = null; loadMain().catch(() => {}); notice('Поездка завершена', true); } catch(e) { notice(e.message); }
+    };
+  } else $('#tripActive').innerHTML = '';
+  $('#tripNew').hidden = Boolean(active);
+  $('#tripsPast').innerHTML = past.length ? `<div class="limit-group-title">Прошлые поездки</div>` + past.map(t => `
+    <div class="debt-row"><span class="debt-row-main"><b>${safe(t.title)}</b><small>${fmtDate(t.start_on)} — ${t.end_on ? fmtDate(t.end_on) : '…'} · ${t.days} ${plural(t.days, 'день', 'дня', 'дней')} · ${t.count} оп.</small></span>
+      <b>${fmtCur(t.spent_cur, t.currency)}</b><button type="button" class="tx-delete" data-trip-del="${t.id}" aria-label="Удалить поездку">×</button></div>`).join('') : '';
+  $$('[data-trip-ops]').forEach(b => b.onclick = async () => {
+    const box = $('#tripOps');
+    if (box.innerHTML) { box.innerHTML = ''; return; }
+    try { const d = await request('api.php?action=trip_ops&id=' + b.dataset.tripOps); renderTxList(box, d.items, 'Операций нет'); } catch(e) { notice(e.message); }
+  });
+  $$('[data-trip-del]').forEach(b => b.onclick = async () => {
+    if (!(await showConfirm('Удалить поездку из списка? Операции останутся в бюджете.'))) return;
+    try { tripsCache = (await request('api.php?action=trip_delete', {method: 'POST', body: JSON.stringify({id: Number(b.dataset.tripDel)})})).items; renderTrips(); } catch(e) { notice(e.message); }
+  });
+}
+$('#tripNew').onclick = () => {
+  tripCur = 'KZT';
+  $('#tripTitle').value = ''; $('#tripBudget').value = ''; $('#tripStart').value = todayISO();
+  $$('#tripCurrency button').forEach(b => b.classList.toggle('selected', b.dataset.cur === 'KZT'));
+  $('#tripModal').hidden = false;
+  setTimeout(() => $('#tripTitle').focus(), 100);
+};
+$$('#tripCurrency button').forEach(b => b.onclick = () => { tripCur = b.dataset.cur; haptic('select'); $$('#tripCurrency button').forEach(x => x.classList.toggle('selected', x === b)); });
+$('#tripBudget').oninput = e => { const v = digitsOnly(e.target.value); e.target.value = v ? money(Number(v)) : ''; };
+$$('#tripModal [data-trip-close]').forEach(el => el.onclick = () => { $('#tripModal').hidden = true; });
+$('#tripSave').onclick = async () => {
+  try {
+    tripsCache = (await request('api.php?action=trip_save', {method: 'POST', body: JSON.stringify({title: $('#tripTitle').value, currency: tripCur, budget: digitsOnly($('#tripBudget').value), start_on: $('#tripStart').value})})).items;
+    $('#tripModal').hidden = true; haptic('success'); notice('Хорошей поездки! ✈️', true); renderTrips(); mainCache = null; loadMain().catch(() => {});
+  } catch(e) { haptic('error'); notice(e.message); }
+};
+
 /* ========== TELEGRAM BACK BUTTON ========== */
 // Closes the topmost open layer, like the system back gesture would
-const LAYERS = ['#confirmModal', '#shopSheet', '#planSheet', '#calendarSheet', '#auditSheet', '#trashSheet', '#calModal', '#rangeCalModal', '#customCatModal', '#goalModal', '#moveModal', '#recModal', '#debtModal', '#depositModal', '#accountModal', '#catEditModal', '#importSheet', '#accountSheet', '#accountsSheet', '#catsSheet', '#depositSheet', '#depositsSheet', '#debtsSheet', '#drillSheet', '#profileSheet', '#sheet'];
+const LAYERS = ['#confirmModal', '#photoModal', '#catPdfModal', '#tripModal', '#tripsSheet', '#shopSheet', '#planSheet', '#calendarSheet', '#auditSheet', '#trashSheet', '#calModal', '#rangeCalModal', '#customCatModal', '#goalModal', '#moveModal', '#recModal', '#debtModal', '#depositModal', '#accountModal', '#catEditModal', '#importSheet', '#accountSheet', '#accountsSheet', '#catsSheet', '#depositSheet', '#depositsSheet', '#debtsSheet', '#drillSheet', '#profileSheet', '#sheet'];
 function topLayer(){ return LAYERS.find(sel => !$(sel).hidden) || null; }
 function closeTopLayer(){
   const top = topLayer();
@@ -2451,6 +2756,8 @@ function closeTopLayer(){
     '#debtModal': closeDebtModal, '#depositModal': closeDepositModal, '#debtsSheet': closeDebtsSheet,
     '#depositSheet': closeDeposit, '#depositsSheet': closeDepositsSheet,
     '#accountModal': closeAccountModal, '#catEditModal': closeCatEdit, '#accountSheet': closeAccount, '#accountsSheet': closeAccountsSheet, '#catsSheet': closeCatsSheet,
+    '#photoModal': () => { $('#photoModal').hidden = true; }, '#catPdfModal': () => { $('#catPdfModal').hidden = true; }, '#tripModal': () => { $('#tripModal').hidden = true; },
+    '#tripsSheet': () => closeLayer('#tripsSheet'),
     '#shopSheet': () => closeLayer('#shopSheet'), '#planSheet': () => closeLayer('#planSheet'), '#calendarSheet': () => closeLayer('#calendarSheet'),
     '#auditSheet': () => closeLayer('#auditSheet'), '#trashSheet': () => closeLayer('#trashSheet'),
     '#profileSheet': () => closeProfile(), '#sheet': () => closeSheet(), '#confirmModal': () => $('#confirmCancel').click()})[top]?.();

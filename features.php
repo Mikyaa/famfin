@@ -109,8 +109,10 @@ function validate_entry(array $d): array {
     $orig = $amount;
     $amount = to_kzt($amount, $currency);
   } else $currency = null;
+  $split = (string)($d['split'] ?? '');
+  if ($split !== '' && !isset(SPLIT_KINDS[$split])) throw new RuntimeException('Неверный способ разделить');
   return ['kind' => $kind, 'amount' => $amount, 'category' => $category, 'group' => $group, 'note' => $note, 'date' => $date, 'account' => $account,
-    'orig_amount' => $orig, 'orig_currency' => $currency];
+    'orig_amount' => $orig, 'orig_currency' => $currency, 'split' => $kind === 'expense' && $split !== '' ? $split : null];
 }
 
 function stored_category_group(string $category): ?string {
@@ -121,9 +123,9 @@ function stored_category_group(string $category): ?string {
 }
 
 function insert_transaction(int $memberId, array $e, ?int $recurringId = null, ?string $importKey = null): int {
-  $q = db()->prepare('INSERT INTO transactions(telegram_id,kind,amount,category,category_group,note,occurred_on,recurring_id,import_account,import_key,orig_amount,orig_currency) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)');
+  $q = db()->prepare('INSERT INTO transactions(telegram_id,kind,amount,category,category_group,note,occurred_on,recurring_id,import_account,import_key,orig_amount,orig_currency,split) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)');
   $q->execute([$memberId, $e['kind'], $e['amount'], $e['category'], $e['group'], $e['note'], $e['date'], $recurringId, ($e['account'] ?? '') !== '' ? $e['account'] : null, $importKey,
-    $e['orig_amount'] ?? null, $e['orig_currency'] ?? null]);
+    $e['orig_amount'] ?? null, $e['orig_currency'] ?? null, $e['split'] ?? null]);
   $id = (int)db()->lastInsertId();
   mark_balance_changed();
   audit('create', 'transaction', $id, tx_summary($e));
@@ -146,8 +148,11 @@ function update_transaction(int $id, array $d): array {
   if (!is_member_id($payer)) throw new RuntimeException('Неверный участник');
   // The account is kept unless the form sends one ('' clears it)
   $account = array_key_exists('account', $d) ? ($e['account'] !== '' ? $e['account'] : null) : $old['import_account'];
-  db()->prepare('UPDATE transactions SET telegram_id=?,kind=?,amount=?,category=?,category_group=?,note=?,occurred_on=?,import_account=?,orig_amount=?,orig_currency=? WHERE id=?')
-    ->execute([$payer, $e['kind'], $e['amount'], $e['category'], $e['group'], $e['note'], $e['date'], $account, $e['orig_amount'], $e['orig_currency'], $id]);
+  // Callers that do not send the currency or the split (bot category change) keep the stored ones
+  if (!array_key_exists('currency', $d)) { $e['orig_amount'] = $old['orig_amount']; $e['orig_currency'] = $old['orig_currency']; }
+  if (!array_key_exists('split', $d)) $e['split'] = $old['split'];
+  db()->prepare('UPDATE transactions SET telegram_id=?,kind=?,amount=?,category=?,category_group=?,note=?,occurred_on=?,import_account=?,orig_amount=?,orig_currency=?,split=? WHERE id=?')
+    ->execute([$payer, $e['kind'], $e['amount'], $e['category'], $e['group'], $e['note'], $e['date'], $account, $e['orig_amount'], $e['orig_currency'], $e['kind'] === 'expense' ? $e['split'] : null, $id]);
   mark_balance_changed();
   $before = tx_summary($old);
   $after = tx_summary($e);
@@ -159,6 +164,8 @@ function delete_transaction(int $id): bool {
   $old = get_transaction($id);
   if (!$old) return false;
   db()->prepare('DELETE FROM transactions WHERE id=?')->execute([$id]);
+  // Round-up savings made by this operation go back too
+  db()->prepare('DELETE FROM goal_moves WHERE source_tx=?')->execute([$id]);
   mark_balance_changed();
   if (empty($GLOBALS['FAMFIN_AUDIT_MUTE'])) {
     trash_put('transaction', $old, tx_summary($old));
@@ -193,6 +200,7 @@ function categorize_text(string $text): ?string {
   $t = ' ' . mb_strtolower(trim($text)) . ' ';
   if (trim($t) === '') return null;
   if (trim($t) === 'cu') return 'Продукты';
+  if ($rule = rule_category($text)) return $rule;
   // Exact or prefix match with a category the family already uses (incl. custom ones)
   foreach (known_categories() as $c) {
     $name = mb_strtolower($c['category']);
@@ -273,7 +281,8 @@ function goal_moves_until(string $until): array {
 
 function goals_list(bool $withArchived = false): array {
   $names = allowed_members_map();
-  $goals = db()->query('SELECT id,title,target,deadline,archived,created_at FROM goals' . ($withArchived ? '' : ' WHERE archived=0') . ' ORDER BY archived,id')->fetchAll();
+  $contrib = goal_month_contrib();
+  $goals = db()->query('SELECT id,title,target,deadline,archived,created_at,monthly FROM goals' . ($withArchived ? '' : ' WHERE archived=0') . ' ORDER BY archived,id')->fetchAll();
   $moves = [];
   foreach (db()->query('SELECT goal_id,telegram_id,SUM(amount) total FROM goal_moves GROUP BY goal_id,telegram_id') as $r) $moves[(int)$r['goal_id']][(int)$r['telegram_id']] = (float)$r['total'];
   $today = new DateTimeImmutable('today');
@@ -294,7 +303,8 @@ function goals_list(bool $withArchived = false): array {
     foreach ($moves[$id] ?? [] as $mid => $sum) if (abs($sum) >= 0.01) $by[] = ['id' => $mid, 'name' => $names[$mid] ?? '?', 'amount' => $sum];
     $out[] = ['id' => $id, 'title' => $g['title'], 'target' => $target, 'saved' => round($saved, 2), 'left' => round($left, 2),
       'percent' => $target > 0 ? round(min(100, $saved / $target * 100), 1) : 0, 'deadline' => $g['deadline'], 'months_left' => $monthsLeft,
-      'monthly_needed' => $monthly, 'archived' => (bool)$g['archived'], 'by' => $by];
+      'monthly_needed' => $monthly, 'archived' => (bool)$g['archived'], 'by' => $by,
+      'monthly_plan' => $g['monthly'] !== null ? (float)$g['monthly'] : null, 'this_month' => round($contrib[$id] ?? 0, 2)];
   }
   return $out;
 }
@@ -305,13 +315,14 @@ function goal_save(array $d, array $member): int {
   $deadline = trim((string)($d['deadline'] ?? ''));
   if ($title === '' || mb_strlen($title) > 60 || $target === null) throw new RuntimeException('Укажите название и сумму цели');
   if ($deadline !== '' && !valid_date($deadline, true)) throw new RuntimeException('Неверная дата цели');
+  $monthly = trim((string)($d['monthly'] ?? '')) === '' ? null : parse_amount($d['monthly']);
   $id = (int)($d['id'] ?? 0);
   if ($id) {
-    $q = db()->prepare('UPDATE goals SET title=?,target=?,deadline=? WHERE id=?');
-    $q->execute([$title, $target, $deadline ?: null, $id]);
+    $q = db()->prepare('UPDATE goals SET title=?,target=?,deadline=?,monthly=? WHERE id=?');
+    $q->execute([$title, $target, $deadline ?: null, $monthly, $id]);
     return $id;
   }
-  db()->prepare('INSERT INTO goals(title,target,deadline,created_by) VALUES(?,?,?,?)')->execute([$title, $target, $deadline ?: null, $member['id']]);
+  db()->prepare('INSERT INTO goals(title,target,deadline,created_by,monthly) VALUES(?,?,?,?,?)')->execute([$title, $target, $deadline ?: null, $member['id'], $monthly]);
   return (int)db()->lastInsertId();
 }
 
@@ -1139,7 +1150,7 @@ function deposit_delete(int $id): void {
 
 /* ========== DATA RESET (both members confirm in Telegram) ========== */
 const RESET_TABLES = ['transactions', 'transfers', 'goals', 'goal_moves', 'recurring', 'spend_limits', 'limit_notices', 'balance_adjustments',
-  'debts', 'debt_moves', 'deposits', 'deposit_moves', 'custom_categories', 'statement_jobs', 'plan_items', 'shopping', 'trash'];
+  'debts', 'debt_moves', 'deposits', 'deposit_moves', 'custom_categories', 'statement_jobs', 'plan_items', 'shopping', 'trash', 'category_rules', 'trips'];
 
 function reset_pending(): ?array {
   $r = db()->query("SELECT * FROM reset_requests WHERE status='pending' ORDER BY id DESC LIMIT 1")->fetch();
