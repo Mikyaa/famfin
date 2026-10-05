@@ -2746,16 +2746,93 @@ $('#tripSave').onclick = async () => {
 };
 
 /* ========== GUIDE ========== */
-// Full-screen page over the app: «Назад» (or Telegram's back button) returns to the main tab
-function openGuide(){
-  const g = $('#guidePage');
-  if (!$('#guideNav').children.length) {
-    $('#guideNav').innerHTML = $$('#guidePage .guide-sec').map(sec => `<button type="button" data-guide-go="${sec.id}">${safe(sec.dataset.title)}</button>`).join('');
-    $$('[data-guide-go]').forEach(b => b.onclick = () => { const t = $('#' + b.dataset.guideGo); g.scrollTo({top: t.offsetTop - $('.guide-top').offsetHeight - 8, behavior: 'smooth'}); });
+// Screen by screen like a bank's help: home (search, popular, sections) → section → answer.
+// «Назад» goes one level up; from the guide's home it returns to the app.
+const GUIDE = JSON.parse($('#guideData').textContent);
+const GUIDE_GO = {
+  add: () => openSheet(), reports: () => switchTab('reports'), categories: () => $('#categoriesOpen').click(),
+  plan: () => $('#planOpen').click(), calendar: () => $('#calendarOpen').click(), trips: () => $('#tripsOpen').click(), shop: () => $('#shopOpen').click(),
+  accounts: () => $('#accountsOpen').click(), deposits: () => $('#depositsOpen').click(), debts: () => $('#debtsOpen').click(),
+  audit: () => $('#auditOpen').click(), trash: () => $('#trashOpen').click(),
+  limits: () => openProfile('limitsSec'), roundup: () => openProfile('roundupSec'), notify: () => openProfile('notifySec'), siri: () => openProfile('siriSec'),
+  recurring: () => openProfile('recurringBlock'), import: () => openProfile('importSec'), reset: () => openProfile('resetSec'),
+};
+const GUIDE_GO_LABEL = {add: 'Добавить запись', reports: 'Открыть отчёты', categories: 'Открыть категории', plan: 'Открыть план', calendar: 'Открыть календарь', trips: 'Открыть поездки',
+  shop: 'Открыть покупки', accounts: 'Открыть счета', deposits: 'Открыть депозиты', debts: 'Открыть долги', audit: 'Открыть журнал', trash: 'Открыть корзину',
+  limits: 'Настроить лимиты', roundup: 'Настроить копилку', notify: 'Открыть уведомления', siri: 'Настроить Siri', recurring: 'Открыть платежи', import: 'Загрузить выписку', reset: 'Открыть сброс'};
+let guideStack = [], guideQuery = '';
+const guideSec = id => GUIDE.sections.find(s => s.id === id);
+const guideIcon = d => `<span class="pf-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg></span>`;
+const guideRow = (sid, i, extra = '') => { const q = guideSec(sid).items[i]; return `<button type="button" class="guide-row" data-gq="${sid}:${i}">${extra}<span>${safe(q.q)}</span><i class="pf-chev side" aria-hidden="true"></i></button>`; };
+
+function renderGuide(){
+  const view = guideStack[guideStack.length - 1] || {v: 'home'};
+  const el = $('#guideView');
+  let html = '';
+  if (view.v === 'home') {
+    $('#guideTitle').textContent = 'Гид';
+    html = `<div class="guide-hero"><b>Чем помочь?</b><span>Ответы на вопросы о бюджете и боте</span></div>
+      <input type="search" class="note-input guide-search" id="guideSearch" placeholder="Поиск по гиду" autocomplete="off" aria-label="Поиск по гиду" value="${safe(guideQuery)}">
+      <div id="guideResults"></div>`;
+    el.innerHTML = html;
+    renderGuideHome();
+    $('#guideSearch').oninput = e => { guideQuery = e.target.value; renderGuideHome(); };
+  } else if (view.v === 'sec') {
+    const s = guideSec(view.id);
+    $('#guideTitle').textContent = s.title;
+    el.innerHTML = `<div class="guide-sec-head">${guideIcon(s.icon)}<span><b>${safe(s.title)}</b><small>${s.items.length} ${plural(s.items.length, 'вопрос', 'вопроса', 'вопросов')}</small></span></div>
+      <div class="guide-list">${s.items.map((_, i) => guideRow(s.id, i)).join('')}</div>`;
+  } else {
+    const s = guideSec(view.id), q = s.items[view.i];
+    $('#guideTitle').textContent = s.title;
+    const others = s.items.map((_, i) => i).filter(i => i !== view.i).slice(0, 4);
+    el.innerHTML = `<article class="guide-article">
+      ${q.where ? `<div class="guide-where"><span>Где найти</span><b>${safe(q.where)}</b></div>` : ''}
+      <h3>${safe(q.q)}</h3>
+      ${q.text ? `<p class="guide-text">${safe(q.text)}</p>` : ''}
+      ${q.steps ? `<ol class="guide-steps">${q.steps.map((t, n) => `<li><i>${n + 1}</i><span>${safe(t)}</span></li>`).join('')}</ol>` : ''}
+      ${q.tip ? `<div class="guide-tip">💡 ${safe(q.tip)}</div>` : ''}
+      ${q.go ? `<button type="button" class="sheet-submit guide-go" data-go="${q.go}">${GUIDE_GO_LABEL[q.go] || 'Перейти'}</button>` : ''}
+      <div class="guide-feedback" id="guideFeedback"><span>Ответ помог?</span><button type="button" data-fb="1">👍 Да</button><button type="button" data-fb="0">👎 Нет</button></div>
+    </article>
+    ${others.length ? `<div class="guide-label">Ещё в разделе «${safe(s.title)}»</div><div class="guide-list">${others.map(i => guideRow(s.id, i)).join('')}</div>` : ''}`;
+    $$('#guideFeedback [data-fb]').forEach(b => b.onclick = () => {
+      haptic('light');
+      $('#guideFeedback').innerHTML = b.dataset.fb === '1' ? '<span>Спасибо! Рады, что помогли 🙌</span>' : '<span>Спросите бота своими словами — например, «сколько потратили на кафе?» — или напишите Миржану.</span>';
+    });
+    $$('#guideView [data-go]').forEach(b => b.onclick = async () => { const go = GUIDE_GO[b.dataset.go]; await closeGuide(); setTimeout(() => go?.(), 50); });
   }
-  $('#guideSearch').value = ''; filterGuide();
-  $$('#guidePage details').forEach(d => { d.open = false; });
-  g.hidden = false; g.scrollTop = 0;
+  bindGuideRows();
+  $('#guidePage').scrollTop = 0;
+}
+
+function renderGuideHome(){
+  const q = guideQuery.trim().toLowerCase();
+  const box = $('#guideResults');
+  if (q) {
+    const hits = [];
+    GUIDE.sections.forEach(s => s.items.forEach((it, i) => { if ([it.q, it.text, it.where, it.tip, ...(it.steps || [])].join(' ').toLowerCase().includes(q)) hits.push([s, i]); }));
+    box.innerHTML = hits.length
+      ? `<div class="guide-label">Найдено: ${hits.length}</div><div class="guide-list">${hits.map(([s, i]) => guideRow(s.id, i, `<small class="guide-row-sec">${safe(s.title)}</small>`)).join('')}</div>`
+      : '<p class="guide-empty">Ничего не нашлось. Попробуйте другое слово или спросите бота.</p>';
+  } else {
+    box.innerHTML = `<div class="guide-label">Популярные вопросы</div>
+      <div class="guide-list">${GUIDE.top.map(([sid, i], n) => guideRow(sid, i, `<b class="guide-num">${n + 1}</b>`)).join('')}</div>
+      <div class="guide-label">Разделы</div>
+      <div class="guide-tiles">${GUIDE.sections.map(s => `<button type="button" class="guide-tile" data-gs="${s.id}">${guideIcon(s.icon)}<b>${safe(s.title)}</b><small>${s.items.length} ${plural(s.items.length, 'вопрос', 'вопроса', 'вопросов')}</small></button>`).join('')}</div>`;
+  }
+  bindGuideRows();
+}
+
+function bindGuideRows(){
+  $$('#guideView [data-gq]').forEach(b => b.onclick = () => { const [id, i] = b.dataset.gq.split(':'); haptic('select'); guideStack.push({v: 'art', id, i: Number(i)}); renderGuide(); });
+  $$('#guideView [data-gs]').forEach(b => b.onclick = () => { haptic('select'); guideStack.push({v: 'sec', id: b.dataset.gs}); renderGuide(); });
+}
+
+function openGuide(){
+  guideStack = []; guideQuery = '';
+  renderGuide();
+  $('#guidePage').hidden = false;
   document.body.style.overflow = 'hidden';
 }
 async function closeGuide(){
@@ -2765,26 +2842,13 @@ async function closeGuide(){
   switchTab('main');
   window.scrollTo({top: 0});
 }
-function filterGuide(){
-  const q = $('#guideSearch').value.trim().toLowerCase();
-  let any = false;
-  $$('#guidePage .guide-sec').forEach(sec => {
-    let shown = 0;
-    sec.querySelectorAll('details').forEach(d => {
-      const hit = !q || d.textContent.toLowerCase().includes(q);
-      d.hidden = !hit;
-      if (q && hit) d.open = true; else if (!q) d.open = false;
-      if (hit) shown++;
-    });
-    sec.hidden = !shown;
-    if (shown) any = true;
-  });
-  $('#guideEmpty').hidden = any;
-  $('#guideNav').hidden = Boolean(q);
+// One level up; from the guide's home back into the app
+function guideBackStep(){
+  if (guideStack.length) { guideStack.pop(); renderGuide(); return; }
+  closeGuide();
 }
 $('#guideOpen').onclick = openGuide;
-$('#guideBack').onclick = $('#guideBack2').onclick = closeGuide;
-$('#guideSearch').oninput = filterGuide;
+$('#guideBack').onclick = guideBackStep;
 
 /* ========== TELEGRAM BACK BUTTON ========== */
 // Closes the topmost open layer, like the system back gesture would
@@ -2798,7 +2862,7 @@ function closeTopLayer(){
     '#depositSheet': closeDeposit, '#depositsSheet': closeDepositsSheet,
     '#accountModal': closeAccountModal, '#catEditModal': closeCatEdit, '#accountSheet': closeAccount, '#accountsSheet': closeAccountsSheet, '#catsSheet': closeCatsSheet,
     '#photoModal': () => { $('#photoModal').hidden = true; }, '#catPdfModal': () => { $('#catPdfModal').hidden = true; }, '#tripModal': () => { $('#tripModal').hidden = true; },
-    '#tripsSheet': () => closeLayer('#tripsSheet'), '#guidePage': () => closeGuide(),
+    '#tripsSheet': () => closeLayer('#tripsSheet'), '#guidePage': () => guideBackStep(),
     '#shopSheet': () => closeLayer('#shopSheet'), '#planSheet': () => closeLayer('#planSheet'), '#calendarSheet': () => closeLayer('#calendarSheet'),
     '#auditSheet': () => closeLayer('#auditSheet'), '#trashSheet': () => closeLayer('#trashSheet'),
     '#profileSheet': () => closeProfile(), '#sheet': () => closeSheet(), '#confirmModal': () => $('#confirmCancel').click()})[top]?.();
