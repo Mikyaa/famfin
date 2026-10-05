@@ -428,6 +428,15 @@ function parse_bank_statement(string $text, int $payerId): array {
   $text = str_replace(["\u{00A0}", "\u{2009}", "\u{202F}", "\r"], [' ', ' ', ' ', ''], $text);
   $re = '/(\d{2})\.(\d{2})\.(\d{2}|\d{4})\s+([+\-−–])\s*(\d[\d ]*(?:[.,]\d{1,2})?)\s*(?:₸|т\b|тг|KZT)?\s+(Покупк[аи]|Пополнени[ея]|Поступлени[ея]|Перевод[ы]?|Сняти[ея]|Разное|Плат[её]ж[и]?|Оплата)\s*([^\n]*)/u';
   preg_match_all($re, $text, $m, PREG_SET_ORDER);
+  // Freedom Bank: "01.10.2026  -12,345.67 ₸  KZT  Покупка  details" — mapped onto the Kaspi shape
+  if (preg_match_all('/(\d{2})\.(\d{2})\.(\d{4})\s+([+\-]?)([\d,]+\.\d{2})\s*₸\s+KZT\s+(Покупка|Пополнение|Перевод|Плат[её]ж|Возврат\. Отмена|Возврат|Снятие|Другое)\s*([^\n]*)/u', $text, $f, PREG_SET_ORDER)) {
+    foreach ($f as $x) {
+      $type = str_starts_with($x[6], 'Возврат') ? 'Покупка' : ($x[6] === 'Другое' ? 'Разное' : $x[6]); // a refund is an incoming purchase
+      // Freedom repeats the operation in the details ("Покупка в MAGNUM ...") — keep only the merchant
+      $details = preg_replace('/^(Покупка|Оплата|Платеж|Платёж)(\s+в)?\s+/u', '', trim($x[7]));
+      $m[] = [$x[0], $x[1], $x[2], $x[3], $x[4] === '-' ? '-' : '+', str_replace([',', '.'], ['', ','], $x[5]), $type, $details];
+    }
+  }
   $rows = [];
   foreach ($m as $x) {
     $year = strlen($x[3]) === 2 ? '20' . $x[3] : $x[3];
@@ -824,9 +833,15 @@ function adjustments_schema(PDO $pdo): void {
 function parse_statement_meta(string $text): array {
   $text = str_replace(["\u{00A0}", "\u{2009}", "\u{202F}"], ' ', $text);
   $account = '';
-  if (preg_match('/Номер карты:\s*(\*\d{4})/u', $text, $m)) $account = 'Kaspi Gold ' . $m[1];
-  elseif (preg_match('/Номер счета:\s*(KZ\w{4,})/u', $text, $m)) $account = 'Kaspi ' . substr($m[1], -4);
+  $freedom = (bool)preg_match('/Фридом Банк|bankffin\.kz/u', $text);
+  if ($freedom && preg_match('/Номер карты:\s*\*+(\d{4})/u', $text, $m)) $account = 'Freedom **' . $m[1];
+  elseif (preg_match('/Номер карты:\s*(\*\d{4})/u', $text, $m)) $account = 'Kaspi Gold ' . $m[1];
+  elseif (preg_match('/Номер сч[её]та:\s*(KZ\w{4,})/u', $text, $m)) $account = ($freedom ? 'Freedom ' : 'Kaspi ') . substr($m[1], -4);
   $available = null;
+  // Freedom: statement date in the header and the balance on the account row
+  if ($freedom && preg_match('/Дата:\s+(\d{2})\.(\d{2})\.(\d{4})/u', $text, $d) && preg_match('/KZ\w+\s+KZT\s+(-?[\d,]+\.\d{2})\s*₸/u', $text, $b)) {
+    $available = ['date' => "{$d[3]}-{$d[2]}-{$d[1]}", 'amount' => (float)str_replace(',', '', $b[1])];
+  }
   if (preg_match_all('/Доступно на (\d{2})\.(\d{2})\.(\d{2,4}):?\s+([+\-−])\s*(\d[\d ]*,\d{2})/u', $text, $mm, PREG_SET_ORDER)) {
     foreach ($mm as $x) {
       $date = (strlen($x[3]) === 2 ? '20' . $x[3] : $x[3]) . "-{$x[2]}-{$x[1]}";
