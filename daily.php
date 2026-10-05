@@ -8,6 +8,8 @@ require __DIR__ . '/lib.php';
 
 $opts = getopt('', ['month:', 'force']);
 fwrite(STDOUT, date('c') . ' Recurring reminders sent: ' . send_recurring_reminders() . "\n");
+fwrite(STDOUT, date('c') . ' Debt reminders sent: ' . send_debt_reminders() . "\n");
+if (date('j') === '1') fwrite(STDOUT, date('c') . ' Deposit interest offers: ' . send_deposit_interest_suggestions() . "\n");
 
 if (date('j') === '1' || isset($opts['month'])) {
   $any = $opts['month'] ?? (new DateTimeImmutable('first day of last month'))->format('Y-m-d');

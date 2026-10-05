@@ -106,6 +106,8 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       </div>
     </div>
 
+    <div class="card capital" id="capitalCard" hidden></div>
+
     <div class="balances-personal" id="balancesPersonal"></div>
 
     <div class="section">
@@ -145,6 +147,10 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       <button type="button" class="panel-tile" id="debtsOpen" aria-label="В долг: открыть">
         <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h11l-3-3M17 17H6l3 3"/></svg></span>
         <span class="panel-text"><b>В долг</b><small id="debtTileSub">Добавить запись</small></span>
+      </button>
+      <button type="button" class="panel-tile" id="accountsOpen" aria-label="Счета: открыть">
+        <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a1 1 0 0 1-1-1V7zM4 7l11-3v3M16 13h2"/></svg></span>
+        <span class="panel-text"><b>Счета</b><small id="accountTileSub">Карты и наличные</small></span>
       </button>
       <button type="button" class="panel-tile" id="depositsOpen" aria-label="Депозиты: открыть">
         <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10 12 4l9 6M5 10v8M9.5 10v8M14.5 10v8M19 10v8M3 20h18"/></svg></span>
@@ -194,6 +200,16 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
     </div>
 
     <div class="section">
+      <div class="section-title"><h2>Структура расходов</h2></div>
+      <div id="shareChart" class="card share-chart"></div>
+    </div>
+
+    <div class="section">
+      <div class="section-title"><h2>По месяцам</h2><span class="muted">расходы</span></div>
+      <div id="monthsChart" class="card months-chart"></div>
+    </div>
+
+    <div class="section">
       <div class="section-title"><h2>Обязательные и переменные</h2></div>
       <div id="groups" class="card groups"></div>
     </div>
@@ -223,7 +239,12 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
     <div class="section">
       <div class="section-title">
         <h2>Операции</h2>
-        <button type="button" class="text-button" id="export">Экспорт CSV</button>
+        <button type="button" class="text-button" id="export" aria-expanded="false">Экспорт</button>
+      </div>
+      <div class="export-menu" id="exportMenu" hidden>
+        <button type="button" class="pill-button ghost" data-export="pdf">PDF</button>
+        <button type="button" class="pill-button ghost" data-export="xlsx">Excel</button>
+        <button type="button" class="pill-button ghost" data-export="csv">CSV</button>
       </div>
       <div id="reportHistory" class="history"></div>
       <div class="pagination" id="pagination"></div>
@@ -303,6 +324,11 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
         <button data-date="today" class="selected">Сегодня</button>
         <button data-date="yesterday">Вчера</button>
         <button data-date="custom" id="customDateBtn"><i class="cal-icon">▦</i> <span id="customDateLabel">Выбрать</span></button>
+      </div>
+
+      <div class="entry-fields" id="accountField">
+        <div class="field-label">Счёт <span class="optional">необязательно</span></div>
+        <div class="date-row account-row" id="accountRow"></div>
       </div>
 
       <div class="field-label">Комментарий <span class="optional">необязательно</span></div>
@@ -389,6 +415,17 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       <div class="profile-head">
         <i class="balance-dot" id="profileDot">₸</i>
         <div><div class="balance-name" id="profileName">—</div><div class="balance-sub">Семейный бюджет · доступ через Telegram</div></div>
+      </div>
+
+      <button type="button" class="panel-tile wide" id="categoriesOpen">
+        <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12V4h8l9 9-8 8-9-9zM7.5 7.5h.01"/></svg></span>
+        <span class="panel-text"><b>Категории</b><small>Переименовать, удалить, сменить группу</small></span>
+      </button>
+
+      <div>
+        <h3 class="profile-section-title">Уведомления</h3>
+        <label class="switch-row threshold-row"><span><b>Крупная трата</b><small>Если кто-то запишет трату от этой суммы, второму придёт сообщение. 0 — не уведомлять.</small></span>
+          <span class="limit-input"><input id="bigExpenseInput" inputmode="numeric" autocomplete="off" aria-label="Порог крупной траты"><b>₸</b></span></label>
       </div>
 
       <div>
@@ -572,6 +609,88 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
   </div>
 </div>
 
+<div class="sheet" id="accountsSheet" hidden>
+  <div class="sheet-backdrop" data-accounts-close></div>
+  <div class="sheet-content" role="dialog" aria-labelledby="accountsTitle">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header"><h2 id="accountsTitle">Счета</h2><button class="sheet-close" data-accounts-close aria-label="Закрыть">×</button></div>
+    <div class="sheet-body">
+      <p class="limits-help">Карты и наличные. Остаток счёта считается по его операциям; выписки и чеки привязываются сами, а вручную счёт выбирается в форме записи.</p>
+      <div class="deposit-total" id="accountsTotal"></div>
+      <div id="accountsList" class="debts-list"></div>
+      <button type="button" class="sheet-submit" id="accountAdd">+ Новый счёт</button>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="accountSheet" hidden>
+  <div class="sheet-backdrop" data-account-sheet-close></div>
+  <div class="sheet-content" role="dialog" aria-labelledby="accountSheetTitle">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header"><h2 id="accountSheetTitle">Счёт</h2><button class="sheet-close" data-account-sheet-close aria-label="Закрыть">×</button></div>
+    <div class="sheet-body">
+      <div class="debt-current" id="accountBalance"></div>
+      <div class="deposit-form">
+        <div class="field-label">Сверить с банком или кошельком</div>
+        <input id="accountRealBalance" class="note-input" inputmode="decimal" placeholder="Сколько на самом деле, ₸" autocomplete="off" aria-label="Фактический остаток">
+        <button type="button" class="secondary-button" id="accountReconcile">Сверить остаток</button>
+      </div>
+      <div class="limit-group-title">Операции</div>
+      <div id="accountOps" class="history"></div>
+      <button type="button" class="secondary-button" id="accountEdit">Переименовать или удалить</button>
+    </div>
+  </div>
+</div>
+
+<div class="cal-modal" id="accountModal" hidden>
+  <div class="cal-backdrop" data-account-close></div>
+  <div class="cal-content small" role="dialog" aria-labelledby="accountModalTitle">
+    <div class="cal-header"><div id="accountModalTitle">Новый счёт</div><button class="sheet-close" data-account-close aria-label="Закрыть">×</button></div>
+    <div class="cat-form">
+      <label>Название<input id="accountName" maxlength="80" placeholder="Например, Kaspi Gold или Наличные" autocomplete="off"></label>
+      <div class="group-toggle three" id="accountKind">
+        <button type="button" data-kind="card" class="selected">Карта</button>
+        <button type="button" data-kind="cash">Наличные</button>
+        <button type="button" data-kind="other">Другое</button>
+      </div>
+      <button id="accountSave" class="sheet-submit" type="button">Сохранить</button>
+      <button id="accountDelete" class="sheet-delete" type="button" hidden>Убрать счёт (операции останутся)</button>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="catsSheet" hidden>
+  <div class="sheet-backdrop" data-cats-close></div>
+  <div class="sheet-content" role="dialog" aria-labelledby="catsTitle">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header"><h2 id="catsTitle">Категории</h2><button class="sheet-close" data-cats-close aria-label="Закрыть">×</button></div>
+    <div class="sheet-body">
+      <div id="catsList" class="debts-list"></div>
+      <button type="button" class="sheet-submit" id="catsAdd">+ Новая категория</button>
+    </div>
+  </div>
+</div>
+
+<div class="cal-modal" id="catEditModal" hidden>
+  <div class="cal-backdrop" data-catedit-close></div>
+  <div class="cal-content small" role="dialog" aria-labelledby="catEditTitle">
+    <div class="cal-header"><div id="catEditTitle">Категория</div><button class="sheet-close" data-catedit-close aria-label="Закрыть">×</button></div>
+    <div class="cat-form">
+      <label>Название<input id="catEditName" maxlength="80" autocomplete="off"></label>
+      <div class="group-toggle" id="catEditGroup">
+        <button type="button" data-group="fixed">Обязательные</button>
+        <button type="button" data-group="variable">Переменные</button>
+      </div>
+      <p class="field-help" id="catEditHelp"></p>
+      <button id="catEditSave" class="sheet-submit" type="button">Сохранить</button>
+      <div class="danger-zone">
+        <label>Удалить и перенести операции в<select id="catMoveTo"></select></label>
+        <button id="catDelete" class="danger-button" type="button">Удалить категорию</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="sheet" id="depositsSheet" hidden>
   <div class="sheet-backdrop" data-deposits-close></div>
   <div class="sheet-content" role="dialog" aria-labelledby="depositsTitle">
@@ -592,6 +711,7 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
     <div class="sheet-header"><h2 id="depositSheetTitle">Депозит</h2><button class="sheet-close" data-deposit-sheet-close aria-label="Закрыть">×</button></div>
     <div class="sheet-body">
       <div class="debt-current" id="depositBalance"></div>
+      <p class="field-help" id="depositForecast" hidden></p>
       <div class="group-toggle three" id="depositKind">
         <button type="button" data-kind="in" class="selected">Пополнить</button>
         <button type="button" data-kind="out">Снять</button>

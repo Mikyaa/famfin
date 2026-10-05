@@ -21,6 +21,7 @@ function features_schema(PDO $pdo): void {
     adjustments_schema($pdo);
     $pdo->exec("CREATE TABLE IF NOT EXISTS custom_categories(name TEXT PRIMARY KEY,grp TEXT NOT NULL DEFAULT 'variable',created_by INTEGER NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);");
     debts_schema($pdo);
+    extras_schema($pdo);
     return;
   }
   $cs = 'DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci';
@@ -38,13 +39,15 @@ function features_schema(PDO $pdo): void {
   adjustments_schema($pdo);
   $pdo->exec("CREATE TABLE IF NOT EXISTS custom_categories(name VARCHAR(80) PRIMARY KEY,grp VARCHAR(16) NOT NULL DEFAULT 'variable',created_by BIGINT NULL,created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
   debts_schema($pdo);
+  extras_schema($pdo);
 }
 
 /* ========== CUSTOM CATEGORIES ========== */
 // Created from the entry form or the limits screen; available everywhere right away
 function custom_categories(): array {
   $out = [];
-  foreach (db()->query('SELECT name,grp FROM custom_categories ORDER BY created_at,name') as $r) $out[(string)$r['name']] = $r['grp'] === 'fixed' ? 'fixed' : 'variable';
+  // Insertion order: defaults as listed in config, then the family's own
+  foreach (db()->query('SELECT name,grp FROM custom_categories ORDER BY ' . (is_sqlite() ? 'rowid' : 'created_at,name')) as $r) $out[(string)$r['name']] = $r['grp'] === 'fixed' ? 'fixed' : 'variable';
   return $out;
 }
 
@@ -96,7 +99,9 @@ function validate_entry(array $d): array {
   }
   $groupInput = $d['category_group'] ?? null;
   $group = in_array($groupInput, ['fixed', 'variable'], true) ? $groupInput : category_group_of($category, stored_category_group($category));
-  return ['kind' => $kind, 'amount' => $amount, 'category' => $category, 'group' => $group, 'note' => $note, 'date' => $date];
+  $account = trim((string)($d['account'] ?? ''));
+  if (mb_strlen($account) > 80) throw new RuntimeException('Слишком длинное название счёта');
+  return ['kind' => $kind, 'amount' => $amount, 'category' => $category, 'group' => $group, 'note' => $note, 'date' => $date, 'account' => $account];
 }
 
 function stored_category_group(string $category): ?string {
@@ -106,9 +111,9 @@ function stored_category_group(string $category): ?string {
   return $g === false ? null : (string)$g;
 }
 
-function insert_transaction(int $memberId, array $e, ?int $recurringId = null): int {
-  $q = db()->prepare('INSERT INTO transactions(telegram_id,kind,amount,category,category_group,note,occurred_on,recurring_id) VALUES(?,?,?,?,?,?,?,?)');
-  $q->execute([$memberId, $e['kind'], $e['amount'], $e['category'], $e['group'], $e['note'], $e['date'], $recurringId]);
+function insert_transaction(int $memberId, array $e, ?int $recurringId = null, ?string $importKey = null): int {
+  $q = db()->prepare('INSERT INTO transactions(telegram_id,kind,amount,category,category_group,note,occurred_on,recurring_id,import_account,import_key) VALUES(?,?,?,?,?,?,?,?,?,?)');
+  $q->execute([$memberId, $e['kind'], $e['amount'], $e['category'], $e['group'], $e['note'], $e['date'], $recurringId, ($e['account'] ?? '') !== '' ? $e['account'] : null, $importKey]);
   mark_balance_changed();
   return (int)db()->lastInsertId();
 }
@@ -127,8 +132,10 @@ function update_transaction(int $id, array $d): array {
   $e = validate_entry($d);
   $payer = isset($d['payer_id']) ? (int)$d['payer_id'] : (int)$old['telegram_id'];
   if (!is_member_id($payer)) throw new RuntimeException('Неверный участник');
-  db()->prepare('UPDATE transactions SET telegram_id=?,kind=?,amount=?,category=?,category_group=?,note=?,occurred_on=? WHERE id=?')
-    ->execute([$payer, $e['kind'], $e['amount'], $e['category'], $e['group'], $e['note'], $e['date'], $id]);
+  // The account is kept unless the form sends one ('' clears it)
+  $account = array_key_exists('account', $d) ? ($e['account'] !== '' ? $e['account'] : null) : $old['import_account'];
+  db()->prepare('UPDATE transactions SET telegram_id=?,kind=?,amount=?,category=?,category_group=?,note=?,occurred_on=?,import_account=? WHERE id=?')
+    ->execute([$payer, $e['kind'], $e['amount'], $e['category'], $e['group'], $e['note'], $e['date'], $account, $id]);
   mark_balance_changed();
   return $e + ['id' => $id, 'payer_id' => $payer];
 }

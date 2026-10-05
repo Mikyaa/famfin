@@ -21,14 +21,23 @@ function wr_day(string $iso, bool $year = false): string {
 function weekly_report_data(?string $anyDayOfWeek = null): array {
   $ref = $anyDayOfWeek ? new DateTimeImmutable($anyDayOfWeek) : (new DateTimeImmutable('today'))->modify('-7 days');
   $from = $ref->modify('monday this week');
-  $until = $from->modify('+7 days');
+  return period_report_data($from->format('Y-m-d'), $from->modify('+7 days')->format('Y-m-d'));
+}
+
+// Any period: the weekly card's data with a title that fits the span
+function period_report_data(string $fromIso, string $untilIso): array {
+  $from = new DateTimeImmutable($fromIso);
+  $until = new DateTimeImmutable($untilIso);
   $s = range_summary($from->format('Y-m-d'), $until->format('Y-m-d'));
   $daily = daily_series($from->format('Y-m-d'), $until->format('Y-m-d'));
   $balances = balances_until((new DateTimeImmutable('tomorrow'))->format('Y-m-d'));
   $limits = array_values(array_filter(limits_status(0)['items'], fn($i) => $i['scope'] === 'family'));
   $cats = [];
   foreach ($s['categories'] as $name => $c) $cats[] = ['name' => (string)$name, 'total' => $c['total'], 'group' => $c['group']];
+  $days = (int)$from->diff($until)->days;
   return [
+    'title' => $days === 7 && $from->format('N') === '1' ? 'Итоги недели' : ($from->format('d') === '01' && $until->format('d') === '01' && $days <= 31 ? 'Итоги месяца' : 'Итоги периода'),
+    'span' => $days === 7 ? 'за неделю' : ($days <= 31 ? 'за месяц' : 'за период'),
     'from' => $from->format('Y-m-d'),
     'to' => $until->modify('-1 day')->format('Y-m-d'),
     'expenses' => $s['expenses'],
@@ -154,8 +163,8 @@ function render_weekly_report_png(array $d, string $file): void {
   $c->swoosh($P + 640, $P + $cardW - 2, $y + 236, $y + 150, 54, 85);
   $c->image(__DIR__ . '/img/logo-mark.png', $P + 44, $y + 44, 76);
   $c->text('Семейный бюджет', $P + 140, $y + 78, 30, '#FFFFFF', 'SemiBold');
-  $c->text('Итоги недели · ' . wr_day($d['from']) . ' — ' . wr_day($d['to'], true), $P + 140, $y + 114, 24, '#A9B0BE');
-  $c->text('Потрачено за неделю', $P + 44, $y + 210, 26, '#A9B0BE');
+  $c->text(($d['title'] ?? 'Итоги недели') . ' · ' . wr_day($d['from']) . ' — ' . wr_day($d['to'], true), $P + 140, $y + 114, 24, '#A9B0BE');
+  $c->text('Потрачено ' . ($d['span'] ?? 'за неделю'), $P + 44, $y + 210, 26, '#A9B0BE');
   $c->text(wr_money($d['expenses']), $P + 44, $y + 300, 84, '#FFFFFF', 'SemiBold');
   $days = max(1, count($d['daily']));
   $stats = [['Пополнения', wr_money($d['topups'], true)], ['В среднем в день', wr_money($d['expenses'] / $days)], ['Операций', (string)$d['count']]];
@@ -183,18 +192,28 @@ function render_weekly_report_png(array $d, string $file): void {
   $c->rrect($P, $y, $cardW, $hDays, 36, '#FFFFFF');
   $c->text('По дням', $P + 40, $y + 62, 30, $ink, 'SemiBold');
   $max = max(1, ...array_map(fn($x) => $x['expense'], $d['daily']));
-  $chartTop = $y + 120; $chartH = 190; $colW = ($cardW - 80) / 7;
+  $n = max(1, count($d['daily']));
+  $chartTop = $y + 120; $chartH = 190; $colW = ($cardW - 80) / $n;
+  $pad = $n <= 7 ? 22 : max(1, $colW * 0.18);
+  $r = $n <= 7 ? 14 : max(2, ($colW - 2 * $pad) / 2);
   foreach ($d['daily'] as $i => $day) {
     $cx = $P + 40 + $i * $colW;
     $bh = $day['expense'] > 0 ? max(8, $day['expense'] / $max * $chartH) : 6;
-    $c->rrect($cx + 22, $chartTop, $colW - 44, $chartH, 14, $track);
+    if ($n <= 7) $c->rrect($cx + $pad, $chartTop, $colW - 2 * $pad, $chartH, $r, $track);
     $isMax = $day['expense'] == $max && $day['expense'] > 0;
-    $c->rrect($cx + 22, $chartTop + $chartH - $bh, $colW - 44, $bh, 14, $isMax ? '#2134C0' : '#2A62EC');
+    $c->rrect($cx + $pad, $chartTop + $chartH - $bh, $colW - 2 * $pad, $bh, $r, $isMax ? '#2134C0' : '#2A62EC');
+    if ($n > 7) {
+      // Long periods: label only the busiest day and every 5th date
+      if ($isMax) $c->text(wr_money($day['expense']), min($P + $cardW - 120, max($P + 120, $cx + $colW / 2)), $chartTop + $chartH - $bh - 12, 20, $ink, 'SemiBold', 'center');
+      $dn = (int)substr($day['date'], 8, 2);
+      if ($i === 0 || $dn % 5 === 0) $c->text((string)$dn, $cx + $colW / 2, $chartTop + $chartH + 46, 20, $muted, 'Regular', 'center');
+      continue;
+    }
     if ($day['expense'] > 0) {
       $label = $day['expense'] >= 1000 ? round($day['expense'] / 1000, $day['expense'] >= 100000 ? 0 : 1) . 'k' : (string)round($day['expense']);
       $c->text(str_replace('.', ',', $label), $cx + $colW / 2, $chartTop + $chartH - $bh - 12, 20, $ink, 'SemiBold', 'center');
     }
-    $c->text(WR_DAYS[$i], $cx + $colW / 2, $chartTop + $chartH + 46, 22, $muted, 'Regular', 'center');
+    $c->text(WR_DAYS[(int)(new DateTimeImmutable($day['date']))->format('N') - 1], $cx + $colW / 2, $chartTop + $chartH + 46, 22, $muted, 'Regular', 'center');
   }
   $y += $hDays + $gap;
 

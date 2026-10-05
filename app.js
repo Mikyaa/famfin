@@ -284,7 +284,7 @@ function animateClose(el, animClass = 'closing'){
 }
 
 /* ========== SHEET: ENTRY (add, edit, transfer) ========== */
-const sheetState = {mode:'add', editId:null, kind:'expense', amount:'', category:null, group:'variable', date:todayISO(), dateMode:'today', note:'', payerId:null, from:null, to:null};
+const sheetState = {mode:'add', editId:null, kind:'expense', amount:'', category:null, group:'variable', date:todayISO(), dateMode:'today', note:'', payerId:null, from:null, to:null, account:''};
 let sheetCal = null;
 let sheetInitial = '';
 const familyMembers = () => mainCache?.members || [];
@@ -355,6 +355,7 @@ function openSheet(tx = null){
     amount: tx ? String(Number(tx.amount)) : '', category: tx ? tx.category : null, group: tx ? (tx.group || 'variable') : 'variable',
     date: tx ? tx.occurred_on : todayISO(), note: tx ? (tx.note || '') : '', payerId: tx ? Number(tx.telegram_id) : myId(),
     from: myId(), to: other ? other.id : null,
+    account: tx ? (tx.account || '') : (() => { try { const last = localStorage.getItem('fb_last_account') || ''; return accountsCache.some(a => a.name === last) ? last : ''; } catch { return ''; } })(),
   });
   $('#sheetTitle').textContent = tx ? 'Изменить запись' : 'Новая запись';
   $('#noteInput').value = sheetState.note;
@@ -366,6 +367,7 @@ function openSheet(tx = null){
   renderTransferDir();
   renderPayerToggle();
   applyKindUI();
+  renderAccountRow();
   $('#sheetDelete').hidden = !tx;
   $('#submitBtn').innerHTML = tx ? 'Сохранить изменения' : 'Сохранить <span>↗</span>';
   const sheet = $('#sheet');
@@ -407,6 +409,7 @@ function bindSheet(){
     sheetState.kind = b.dataset.kind;
     haptic('select');
     applyKindUI();
+    renderAccountRow();
   });
 
   const amt = $('#amountInput');
@@ -479,7 +482,7 @@ $('#calCancel').onclick = closeSheetCalendar;
 let customGroup = 'variable';
 let customCatTarget = 'sheet'; // 'sheet' picks the new category for the entry, 'profile' adds a limit row
 function openCustomCatModal(target = 'sheet'){
-  customCatTarget = target === 'profile' ? 'profile' : 'sheet';
+  customCatTarget = ['profile', 'manager'].includes(target) ? target : 'sheet';
   $('#customCatName').value = '';
   customGroup = 'variable';
   $$('#customCatGroup button').forEach(b => b.classList.toggle('selected', b.dataset.group === 'variable'));
@@ -506,7 +509,10 @@ $('#customCatSave').onclick = async () => {
     recurringCategories = d.categories || recurringCategories;
     if (mainCache) mainCache.category_groups = categoryGroups;
     haptic('success');
-    if (customCatTarget === 'profile' && profile) {
+    if (customCatTarget === 'manager') {
+      notice(`Категория «${name}» добавлена`, true);
+      request('api.php?action=categories').then(r => renderCats(r.items)).catch(() => {});
+    } else if (customCatTarget === 'profile' && profile) {
       ['fixed', 'variable'].forEach(g => { profile.groups[g] = profile.groups[g].filter(n => n !== name); });
       profile.groups[group].push(name);
       renderLimitRows();
@@ -538,7 +544,7 @@ async function submitEntry(){
     okText = 'Перевод записан ✓';
   } else {
     if (!sheetState.category) { haptic('error'); notice('Выберите категорию'); return; }
-    body = {kind: sheetState.kind, amount, category: sheetState.category, category_group: sheetState.group, note, date: sheetState.date};
+    body = {kind: sheetState.kind, amount, category: sheetState.category, category_group: sheetState.group, note, date: sheetState.date, account: sheetState.account || ''};
     if (sheetState.mode === 'edit') { url = 'api.php?action=update'; body.id = sheetState.editId; body.payer_id = sheetState.payerId; okText = 'Изменения сохранены ✓'; }
     else { url = 'api.php'; okText = 'Запись добавлена ✓'; }
   }
@@ -722,6 +728,9 @@ async function loadMain(){
     renderGoals(d.goals);
     renderDebts(d.debts);
     renderDeposits(d.deposits);
+    renderAccounts(d.accounts);
+    renderCapital(d);
+    renderSettings(d.settings);
     renderResetStatus(d.reset);
     renderLimits(d.limits);
     showShell();
@@ -920,6 +929,8 @@ function renderReport(d){
   $$('#reportCategories .drillable, #reportMembers .chip[data-cat]').forEach(b => b.onclick = () => openCategory(b.dataset.cat));
 
   renderChart(d.daily, c);
+  renderShareChart(d.summary.categories, d.summary.expenses);
+  renderMonthsChart(d.months, d.from);
   renderReportHistory(d.transactions, c);
   renderPagination(d.pagination);
 }
@@ -1816,6 +1827,12 @@ async function openDeposit(dep){
   const c = cur(currency);
   $('#depositSheetTitle').textContent = dep.title;
   $('#depositBalance').innerHTML = `<span>${[dep.bank && safe(dep.bank), dep.rate !== null && String(dep.rate).replace('.', ',') + '% годовых'].filter(Boolean).join(' · ') || 'Баланс'}</span><b>${money(dep.amount)} ${c}</b>`;
+  // Year ahead with monthly capitalisation at the stated rate
+  if (dep.rate && dep.amount > 0) {
+    const year = dep.amount * Math.pow(1 + dep.rate / 100 / 12, 12);
+    $('#depositForecast').textContent = `Через год ≈ ${money(year)} ${c} (+${money(year - dep.amount)} ${c} процентов при ставке ${String(dep.rate).replace('.', ',')}% с ежемесячной капитализацией)`;
+    $('#depositForecast').hidden = false;
+  } else $('#depositForecast').hidden = true;
   depositKind = 'in';
   $$('#depositKind button').forEach(b => b.classList.toggle('selected', b.dataset.kind === 'in'));
   $('#depositMoveAmount').value = ''; $('#depositMoveNote').value = '';
@@ -1902,6 +1919,241 @@ $('#resetRequest').onclick = async () => {
   } catch(e) { haptic('error'); notice(e.message); }
 };
 
+/* ========== CAPITAL ("Всё наше") ========== */
+function renderCapital(d){
+  const el = $('#capitalCard');
+  const dep = (d.deposits || []).reduce((s, x) => s + x.amount, 0);
+  const t = {owed_to_me: 0, i_owe: 0};
+  (d.debts || []).forEach(x => { if (!x.closed) t[x.direction] += x.amount; });
+  if (!dep && !t.owed_to_me && !t.i_owe) { el.hidden = true; return; }
+  const c = cur(currency);
+  const bal = d.balances.shared.balance;
+  const total = bal + dep + t.owed_to_me - t.i_owe;
+  el.innerHTML = `
+    <div class="capital-top"><span>Всё наше</span><b>${total < 0 ? '−' : ''}${money(Math.abs(total))} ${c}</b></div>
+    <div class="capital-parts">
+      <span>Остаток ${bal < 0 ? '−' : ''}${money(Math.abs(bal))}</span>
+      ${dep ? `<span>Депозиты ${money(dep)}</span>` : ''}
+      ${t.owed_to_me ? `<span class="money-pos">Нам должны +${money(t.owed_to_me)}</span>` : ''}
+      ${t.i_owe ? `<span class="money-neg">Мы должны −${money(t.i_owe)}</span>` : ''}
+    </div>`;
+  el.hidden = false;
+}
+
+/* ========== ACCOUNTS ========== */
+let accountsCache = [], accountOpen = null, accountEditing = null, accountKind = 'card';
+const ACCOUNT_KIND = {card: 'Карта', cash: 'Наличные', other: 'Другое'};
+function renderAccounts(list){
+  accountsCache = list || [];
+  const c = cur(currency);
+  const total = accountsCache.reduce((s, a) => s + a.balance, 0);
+  $('#accountTileSub').textContent = accountsCache.length ? `${accountsCache.length} ${plural(accountsCache.length, 'счёт', 'счёта', 'счетов')} · ${total < 0 ? '−' : ''}${money(Math.abs(total))} ${c}` : 'Карты и наличные';
+  if (!$('#accountsSheet').hidden) renderAccountsSheet();
+  renderAccountRow();
+}
+function renderAccountsSheet(){
+  const c = cur(currency);
+  const total = accountsCache.reduce((s, a) => s + a.balance, 0);
+  $('#accountsTotal').innerHTML = `<span>На всех счетах</span><b>${total < 0 ? '−' : ''}${money(Math.abs(total))} ${c}</b>`;
+  $('#accountsList').innerHTML = accountsCache.length ? accountsCache.map(a => `
+    <button type="button" class="debt-row" data-account="${safe(a.name)}">
+      <span class="debt-row-main"><b>${safe(a.name)}</b><small>${ACCOUNT_KIND[a.kind] || 'Счёт'} · ${a.count} ${plural(a.count, 'операция', 'операции', 'операций')}</small></span>
+      <b class="${a.balance < 0 ? 'money-neg' : ''}">${a.balance < 0 ? '−' : ''}${money(Math.abs(a.balance))} ${c}</b>
+    </button>`).join('') : '<div class="empty">Счетов пока нет</div>';
+  $$('#accountsList [data-account]').forEach(b => b.onclick = () => openAccount(accountsCache.find(a => a.name === b.dataset.account)));
+}
+const openAccountsSheet = () => { renderAccountsSheet(); const s = $('#accountsSheet'); s.hidden = false; s.classList.remove('closing'); };
+const closeAccountsSheet = () => animateClose($('#accountsSheet'));
+async function openAccount(a){
+  accountOpen = a;
+  const c = cur(currency);
+  $('#accountSheetTitle').textContent = a.name;
+  $('#accountBalance').innerHTML = `<span>${ACCOUNT_KIND[a.kind] || 'Счёт'} · остаток в бюджете</span><b class="${a.balance < 0 ? 'money-neg' : ''}">${a.balance < 0 ? '−' : ''}${money(Math.abs(a.balance))} ${c}</b>`;
+  $('#accountRealBalance').value = '';
+  const s = $('#accountSheet'); s.hidden = false; s.classList.remove('closing');
+  $('#accountOps').innerHTML = '<div class="loading-placeholder"><div class="spinner"></div></div>';
+  try {
+    const d = await request('api.php?action=account&name=' + encodeURIComponent(a.name));
+    renderTxList($('#accountOps'), d.operations, 'Операций по этому счёту пока нет');
+  } catch(e) { $('#accountOps').innerHTML = `<div class="empty">${safe(e.message)}</div>`; }
+}
+const closeAccount = () => { accountOpen = null; return animateClose($('#accountSheet')); };
+$('#accountReconcile').onclick = async () => {
+  const v = $('#accountRealBalance').value.replace(/\s/g, '').replace(',', '.');
+  if (v === '' || isNaN(Number(v))) { notice('Введите, сколько на счёте на самом деле'); return; }
+  try {
+    const d = await request('api.php?action=account_reconcile', {method: 'POST', body: JSON.stringify({name: accountOpen.name, balance: v})});
+    haptic('success');
+    notice(d.diff ? `Сверено: корректировка ${d.diff > 0 ? '+' : '−'}${money(Math.abs(d.diff))} ${cur(currency)}` : 'Остаток уже совпадает ✓', true);
+    renderAccounts(d.accounts);
+    const fresh = d.accounts.find(x => x.name === accountOpen.name); if (fresh) openAccount(fresh);
+    reloadAfterChange().catch(() => {});
+  } catch(e) { haptic('error'); notice(e.message); }
+};
+function openAccountModal(a = null){
+  accountEditing = a; accountKind = a ? a.kind : 'card';
+  $('#accountModalTitle').textContent = a ? 'Счёт' : 'Новый счёт';
+  $('#accountName').value = a ? a.name : '';
+  $$('#accountKind button').forEach(b => b.classList.toggle('selected', b.dataset.kind === accountKind));
+  $('#accountDelete').hidden = !a;
+  $('#accountModal').hidden = false;
+  if (!a) setTimeout(() => $('#accountName').focus(), 100);
+}
+const closeAccountModal = () => { $('#accountModal').hidden = true; };
+$$('#accountKind button').forEach(b => b.onclick = () => { accountKind = b.dataset.kind; $$('#accountKind button').forEach(x => x.classList.toggle('selected', x === b)); });
+$('#accountSave').onclick = async () => {
+  try {
+    const d = await request('api.php?action=account_save', {method: 'POST', body: JSON.stringify({old_name: accountEditing?.name || '', name: $('#accountName').value, kind: accountKind})});
+    haptic('success'); notice('Счёт сохранён ✓', true); closeAccountModal();
+    if (accountEditing && !$('#accountSheet').hidden) closeAccount();
+    renderAccounts(d.accounts);
+  } catch(e) { haptic('error'); notice(e.message); }
+};
+$('#accountDelete').onclick = async () => {
+  if (!accountEditing || !(await showConfirm(`Убрать счёт «${accountEditing.name}»? Операции останутся, но без счёта; сверки по нему удалятся.`))) return;
+  try { const d = await request('api.php?action=account_delete', {method: 'POST', body: JSON.stringify({name: accountEditing.name})}); closeAccountModal(); closeAccount(); renderAccounts(d.accounts); notice('Счёт убран', true); reloadAfterChange().catch(() => {}); }
+  catch(e) { notice(e.message); }
+};
+$('#accountsOpen').onclick = openAccountsSheet;
+$('#accountAdd').onclick = () => openAccountModal();
+$('#accountEdit').onclick = () => openAccountModal(accountOpen);
+$$('#accountsSheet [data-accounts-close]').forEach(el => el.onclick = closeAccountsSheet);
+$$('#accountSheet [data-account-sheet-close]').forEach(el => el.onclick = closeAccount);
+$$('#accountModal [data-account-close]').forEach(el => el.onclick = closeAccountModal);
+
+// Account choice in the entry form; the last one used is remembered on this device
+function renderAccountRow(){
+  const row = $('#accountRow');
+  if (!row) return;
+  $('#accountField').hidden = !accountsCache.length || sheetState.kind === 'transfer';
+  const names = accountsCache.map(a => a.name);
+  if (sheetState.account && !names.includes(sheetState.account)) names.push(sheetState.account);
+  row.innerHTML = [`<button type="button" data-account="" class="${!sheetState.account ? 'selected' : ''}">Без счёта</button>`, ...names.map(n => `<button type="button" data-account="${safe(n)}" class="${sheetState.account === n ? 'selected' : ''}">${safe(n)}</button>`)].join('');
+  $$('#accountRow button').forEach(b => b.onclick = () => {
+    sheetState.account = b.dataset.account;
+    try { localStorage.setItem('fb_last_account', sheetState.account); } catch {}
+    haptic('select'); renderAccountRow();
+  });
+}
+
+/* ========== CATEGORY MANAGER (profile) ========== */
+let catsCache = [], catEditing = null, catEditGroup = 'variable';
+async function openCatsSheet(){
+  const s = $('#catsSheet'); s.hidden = false; s.classList.remove('closing');
+  $('#catsList').innerHTML = '<div class="loading-placeholder"><div class="spinner"></div></div>';
+  try { renderCats((await request('api.php?action=categories')).items); } catch(e) { $('#catsList').innerHTML = `<div class="empty">${safe(e.message)}</div>`; }
+}
+const closeCatsSheet = () => animateClose($('#catsSheet'));
+function renderCats(items){
+  catsCache = items;
+  const c = cur(currency);
+  const group = (g, title) => `<div class="limit-group-title">${title}</div>` + items.filter(x => x.group === g).map(x => `
+    <button type="button" class="debt-row" data-cat="${safe(x.name)}">
+      <span class="debt-row-main"><b><i class="dot-mark ${x.group}"></i> ${safe(x.name)}</b><small>${x.count ? `${x.count} ${plural(x.count, 'операция', 'операции', 'операций')} · ${money(x.total)} ${c}` : 'операций нет'}</small></span>
+      <i class="drill-arrow">›</i>
+    </button>`).join('');
+  $('#catsList').innerHTML = group('fixed', 'Обязательные') + group('variable', 'Переменные');
+  $$('#catsList [data-cat]').forEach(b => b.onclick = () => openCatEdit(catsCache.find(x => x.name === b.dataset.cat)));
+}
+function openCatEdit(cat){
+  catEditing = cat; catEditGroup = cat.group;
+  $('#catEditTitle').textContent = cat.name;
+  $('#catEditName').value = cat.name;
+  $$('#catEditGroup button').forEach(b => b.classList.toggle('selected', b.dataset.group === catEditGroup));
+  $('#catEditHelp').textContent = cat.count ? `Изменения применятся к ${cat.count} ${plural(cat.count, 'операции', 'операциям', 'операциям')}, лимитам и регулярным платежам. Если назвать так же, как другую категорию, они объединятся.` : 'По этой категории операций пока нет.';
+  $('#catMoveTo').innerHTML = catsCache.filter(x => x.name !== cat.name).map(x => `<option ${x.name === 'Другое' ? 'selected' : ''}>${safe(x.name)}</option>`).join('');
+  $('#catEditModal').hidden = false;
+}
+const closeCatEdit = () => { $('#catEditModal').hidden = true; };
+$$('#catEditGroup button').forEach(b => b.onclick = () => { catEditGroup = b.dataset.group; $$('#catEditGroup button').forEach(x => x.classList.toggle('selected', x === b)); });
+async function afterCategoryChange(d, msg){
+  categoryGroups = d.category_groups || categoryGroups;
+  if (mainCache) mainCache.category_groups = categoryGroups;
+  renderCats(d.items); closeCatEdit(); haptic('success'); notice(msg, true);
+  reloadAfterChange().catch(() => {});
+}
+$('#catEditSave').onclick = async () => {
+  try { await afterCategoryChange(await request('api.php?action=category_update', {method: 'POST', body: JSON.stringify({name: catEditing.name, new_name: $('#catEditName').value, group: catEditGroup})}), 'Категория сохранена ✓'); }
+  catch(e) { haptic('error'); notice(e.message); }
+};
+$('#catDelete').onclick = async () => {
+  const to = $('#catMoveTo').value;
+  if (!(await showConfirm(`Удалить «${catEditing.name}»? ${catEditing.count ? `Операции (${catEditing.count}) перейдут в «${to}».` : ''}`))) return;
+  try { await afterCategoryChange(await request('api.php?action=category_delete', {method: 'POST', body: JSON.stringify({name: catEditing.name, move_to: to})}), 'Категория удалена'); }
+  catch(e) { haptic('error'); notice(e.message); }
+};
+$('#categoriesOpen').onclick = openCatsSheet;
+$('#catsAdd').onclick = () => openCustomCatModal('manager');
+$$('#catsSheet [data-cats-close]').forEach(el => el.onclick = closeCatsSheet);
+$$('#catEditModal [data-catedit-close]').forEach(el => el.onclick = closeCatEdit);
+
+/* ========== BIG EXPENSE THRESHOLD ========== */
+function renderSettings(s){ if (s && document.activeElement !== $('#bigExpenseInput')) $('#bigExpenseInput').value = s.big_expense_threshold ? money(s.big_expense_threshold) : '0'; }
+$('#bigExpenseInput').oninput = e => { const v = digitsOnly(e.target.value); e.target.value = v ? money(Number(v)) : ''; };
+$('#bigExpenseInput').onchange = async () => {
+  try { const d = await request('api.php?action=settings', {method: 'POST', body: JSON.stringify({big_expense_threshold: digitsOnly($('#bigExpenseInput').value) || '0'})}); renderSettings(d.settings); notice(d.settings.big_expense_threshold ? `Сообщим о тратах от ${money(d.settings.big_expense_threshold)} ${cur(currency)}` : 'Уведомления о крупных тратах выключены', true); }
+  catch(e) { notice(e.message); }
+};
+
+/* ========== REPORT CHARTS ========== */
+// Single series: one hue; the current period's month is the darker accent
+function renderMonthsChart(months, periodFrom){
+  const el = $('#monthsChart');
+  if (!months || !months.length) { el.innerHTML = '<div class="empty">Нет данных</div>'; return; }
+  const c = cur(currency);
+  const max = Math.max(1, ...months.map(m => m.expenses));
+  const cur7 = (periodFrom || '').slice(0, 7);
+  el.innerHTML = `<div class="mbars" role="img" aria-label="Расходы по месяцам: ${months.map(m => MONTHS[Number(m.month.slice(5)) - 1] + ' ' + money(m.expenses)).join(', ')}">${months.map(m => {
+    const h = m.expenses / max * 100;
+    const label = MONTHS_SHORT[Number(m.month.slice(5)) - 1];
+    return `<div class="mbar ${m.month === cur7 ? 'current' : ''}" tabindex="0" title="${MONTHS[Number(m.month.slice(5)) - 1]} ${m.month.slice(0, 4)}: ${money(m.expenses)} ${c}">
+      <span class="mbar-val">${m.expenses ? (m.expenses >= 1000 ? (Math.round(m.expenses / 100) / 10).toString().replace('.', ',') + 'k' : money(m.expenses)) : ''}</span>
+      <i style="height:${Math.max(m.expenses ? 3 : 0, h)}%"></i><span class="mbar-label">${label}</span></div>`;
+  }).join('')}</div>`;
+}
+
+// Part-to-whole: one stacked bar (top 5 + other) with a legend that carries names and values
+const SHARE_COLORS = ['var(--cat-1)', 'var(--cat-2)', 'var(--cat-3)', 'var(--cat-4)', 'var(--cat-5)', 'var(--cat-other)'];
+function renderShareChart(categories, total){
+  const el = $('#shareChart');
+  const entries = Object.entries(categories || {}).map(([n, v]) => [n, v.total]).sort((a, b) => b[1] - a[1]);
+  if (!entries.length || !total) { el.innerHTML = '<div class="empty">Трат за период нет</div>'; return; }
+  const top = entries.slice(0, 5);
+  const rest = entries.slice(5).reduce((s, x) => s + x[1], 0);
+  if (rest > 0) top.push(['Другие', rest]);
+  const c = cur(currency);
+  el.innerHTML = `<div class="share-bar" role="img" aria-label="Структура расходов">${top.map(([n, v], i) => `<i style="flex:${v};background:${SHARE_COLORS[i]}" title="${safe(n)}: ${money(v)} ${c}"></i>`).join('')}</div>
+    <div class="share-legend">${top.map(([n, v], i) => `<button type="button" class="share-item" ${n !== 'Другие' ? `data-cat="${safe(n)}"` : 'disabled'}>
+      <i style="background:${SHARE_COLORS[i]}"></i><span>${safe(n)}</span><b>${money(v)} ${c}</b><small>${Math.round(v / total * 100)}%</small></button>`).join('')}</div>`;
+  $$('#shareChart .share-item[data-cat]').forEach(b => b.onclick = () => openDrill({from: reportCache.from, to: reportCache.to, group: 'all', category: b.dataset.cat, view: 'transactions', title: b.dataset.cat + ' · ' + periodRange().title}));
+}
+
+/* ========== EXPORT ========== */
+$('#export').onclick = () => { const m = $('#exportMenu'); m.hidden = !m.hidden; $('#export').setAttribute('aria-expanded', String(!m.hidden)); };
+$$('#exportMenu [data-export]').forEach(b => b.onclick = async () => {
+  const fmt = b.dataset.export;
+  const from = reportCache?.from, to = reportCache?.to;
+  b.disabled = true;
+  try {
+    if (inTelegram && fmt !== 'csv') {
+      await request('api.php?action=export_send', {method: 'POST', body: JSON.stringify({format: fmt, from, to})});
+      haptic('success'); notice('Файл отправлен в чат с ботом 📎', true);
+    } else {
+      const u = new URL('api.php', location.href);
+      u.searchParams.set('action', fmt === 'csv' ? 'export' : 'export_' + fmt);
+      if (from) { u.searchParams.set('from', from); u.searchParams.set('to', to); }
+      const r = await fetch(u.toString(), {headers: headers(), credentials: 'same-origin'});
+      if (!r.ok) throw Error('Не удалось подготовить файл');
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(await r.blob());
+      a.download = `family-budget-${from || 'all'}-${to || 'all'}.${fmt}`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    }
+  } catch(e) { haptic('error'); notice(e.message); }
+  finally { b.disabled = false; }
+});
+
 /* ========== THEME ========== */
 function themePref(){ try { return localStorage.getItem('fb_theme') || 'auto'; } catch { return 'auto'; } }
 function applyTheme(){
@@ -1920,7 +2172,7 @@ tg?.onEvent?.('themeChanged', applyTheme);
 
 /* ========== TELEGRAM BACK BUTTON ========== */
 // Closes the topmost open layer, like the system back gesture would
-const LAYERS = ['#confirmModal', '#calModal', '#rangeCalModal', '#customCatModal', '#goalModal', '#moveModal', '#recModal', '#debtModal', '#depositModal', '#importSheet', '#depositSheet', '#depositsSheet', '#debtsSheet', '#drillSheet', '#profileSheet', '#sheet'];
+const LAYERS = ['#confirmModal', '#calModal', '#rangeCalModal', '#customCatModal', '#goalModal', '#moveModal', '#recModal', '#debtModal', '#depositModal', '#accountModal', '#catEditModal', '#importSheet', '#accountSheet', '#accountsSheet', '#catsSheet', '#depositSheet', '#depositsSheet', '#debtsSheet', '#drillSheet', '#profileSheet', '#sheet'];
 function topLayer(){ return LAYERS.find(sel => !$(sel).hidden) || null; }
 function closeTopLayer(){
   const top = topLayer();
@@ -1928,6 +2180,7 @@ function closeTopLayer(){
     '#moveModal': closeMoveModal, '#recModal': closeRecModal, '#importSheet': closeImport, '#drillSheet': closeDrill,
     '#debtModal': closeDebtModal, '#depositModal': closeDepositModal, '#debtsSheet': closeDebtsSheet,
     '#depositSheet': closeDeposit, '#depositsSheet': closeDepositsSheet,
+    '#accountModal': closeAccountModal, '#catEditModal': closeCatEdit, '#accountSheet': closeAccount, '#accountsSheet': closeAccountsSheet, '#catsSheet': closeCatsSheet,
     '#profileSheet': () => closeProfile(), '#sheet': () => closeSheet(), '#confirmModal': () => $('#confirmCancel').click()})[top]?.();
 }
 function syncBackButton(){
@@ -1978,20 +2231,7 @@ $$('#categoryFilter button').forEach(b => b.onclick = () => {
   if (reportCache) renderReport(reportCache);
 });
 
-$('#export').onclick = async () => {
-  try {
-    const u = new URL('api.php', location.href);
-    u.searchParams.set('action','export');
-    if (reportCache) { u.searchParams.set('from', reportCache.from); u.searchParams.set('to', reportCache.to); }
-    const r = await fetch(u.toString(), {headers: headers(), credentials: 'same-origin'});
-    if (!r.ok) throw Error('Не удалось скачать CSV');
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(await r.blob());
-    a.download = `family-budget-${reportCache?.from||'all'}-${reportCache?.to||'all'}.csv`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  } catch(e) { notice(e.message); }
-};
+
 
 bindSheet();
 switchTab('main');

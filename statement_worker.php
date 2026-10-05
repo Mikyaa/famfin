@@ -11,6 +11,6 @@ foreach ($jobs as $job) {
   $claim = db()->prepare("UPDATE statement_jobs SET status='working' WHERE id=? AND status='new'");
   $claim->execute([$job['id']]);
   if ($claim->rowCount() === 0) continue;
-  process_statement_job($job);
+  if (($job['kind'] ?? 'statement') === 'receipt') process_receipt_job($job); else process_statement_job($job);
   fwrite(STDOUT, date('c') . " Statement job {$job['id']} ({$job['file_name']}) processed\n");
 }

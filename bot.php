@@ -107,6 +107,13 @@ function bot_tx_markup(int $userId, int $txId): array {
 
 /* ========== TEXT ENTRY ========== */
 function bot_handle_text(int $chatId, int $userId, string $text): bool {
+  // A link from a fiscal receipt's QR
+  if ($receipt = parse_receipt_url($text)) { bot_offer_receipt($chatId, $userId, $receipt); return true; }
+  // A question about the budget ("сколько потратили на кафе в сентябре?")
+  if (looks_like_question($text)) {
+    $answer = answer_question($text, $userId);
+    if ($answer !== null) { telegram('sendMessage', ['chat_id' => $chatId, 'text' => $answer]); return true; }
+  }
   $e = parse_entry_text($text);
   if (!$e) return false;
   $who = user_label($userId);
@@ -121,16 +128,68 @@ function bot_handle_text(int $chatId, int $userId, string $text): bool {
   return true;
 }
 
+// Receipt from a QR (link or photo): amount and date are known, ask only the category
+function bot_offer_receipt(int $chatId, int $userId, array $r, ?int $editMessageId = null): void {
+  $text = '';
+  $markup = null;
+  if (receipt_exists($r['key'])) {
+    $text = '🧾 Этот чек уже записан в бюджет.';
+  } else {
+    $entry = ['kind' => 'expense', 'amount' => $r['amount'], 'category' => null, 'note' => 'Чек' . ($r['time'] ? ' ' . $r['time'] : ''), 'date' => $r['date'], 'key' => $r['key']];
+    $labels = bot_category_labels('expense');
+    $markup = bot_keyboard($userId, ['type' => 'draft', 'entry' => $entry, 'opts' => array_merge($labels, ['__cancel'])], array_merge($labels, ['✖️ Не записывать']));
+    $text = '🧾 Чек на ' . fmt_money($r['amount']) . ' от ' . (new DateTimeImmutable($r['date']))->format('d.m.Y') . ($r['time'] ? ', ' . $r['time'] : '') . "
+Куда отнести?";
+  }
+  $payload = ['chat_id' => $chatId, 'text' => $text];
+  if ($markup) $payload['reply_markup'] = $markup;
+  if ($editMessageId) telegram('editMessageText', $payload + ['message_id' => $editMessageId]);
+  else telegram('sendMessage', $payload);
+}
+
 function bot_save_entry(int $userId, array $raw): array {
   $e = validate_entry($raw);
-  $id = insert_transaction($userId, $e);
+  $key = isset($raw['key']) ? (string)$raw['key'] : null;
+  if ($key !== null && receipt_exists($key)) throw new RuntimeException('Этот чек уже записан');
+  $id = insert_transaction($userId, $e, null, $key);
+  notify_big_expense(['id' => $userId, 'name' => user_label($userId)], $e);
   $limits = $e['kind'] === 'expense' ? check_limit_alerts($e['category'], $e['date'], ['id' => $userId, 'name' => user_label($userId)], (float)$e['amount']) : [];
   return ['id' => $id, 'entry' => $e, 'limits' => $limits];
 }
 
 /* ========== STATEMENT FILES ========== */
+// A receipt photo: queued, statement_worker.php reads the QR
+function bot_handle_photo(int $chatId, int $userId, string $fileId): void {
+  $r = telegram('sendMessage', ['chat_id' => $chatId, 'text' => '📷 Ищу QR-код на чеке…']);
+  db()->prepare("INSERT INTO statement_jobs(telegram_id,chat_id,file_id,file_name,message_id,kind) VALUES(?,?,?,?,?,'receipt')")
+    ->execute([$userId, $chatId, $fileId, 'receipt.jpg', $r['result']['message_id'] ?? null]);
+}
+
+function process_receipt_job(array $job): void {
+  $tmp = tempnam(sys_get_temp_dir(), 'rcp');
+  try {
+    telegram_download($job['file_id'], $tmp);
+    $text = decode_qr_image($tmp);
+    $r = $text ? parse_receipt_url($text) : null;
+    if (!$r) {
+      $msg = $text ? 'QR-код прочитан, но это не фискальный чек.' : "Не нашёл QR-код на фото. Сфотографируйте QR крупнее и ровнее — или отсканируйте его камерой телефона и пришлите ссылку.";
+      telegram('editMessageText', ['chat_id' => (int)$job['chat_id'], 'message_id' => (int)$job['message_id'], 'text' => '📷 ' . $msg]);
+    } else {
+      bot_offer_receipt((int)$job['chat_id'], (int)$job['telegram_id'], $r, $job['message_id'] ? (int)$job['message_id'] : null);
+    }
+    db()->prepare("UPDATE statement_jobs SET status='done' WHERE id=?")->execute([$job['id']]);
+  } catch (Throwable $e) {
+    db()->prepare("UPDATE statement_jobs SET status='error',error=? WHERE id=?")->execute([mb_substr($e->getMessage(), 0, 500), $job['id']]);
+    telegram('editMessageText', ['chat_id' => (int)$job['chat_id'], 'message_id' => (int)$job['message_id'], 'text' => '⚠️ ' . ($e instanceof RuntimeException ? $e->getMessage() : 'Не удалось прочитать фото')]);
+  } finally {
+    @unlink($tmp);
+  }
+}
+
 function bot_handle_document(int $chatId, int $userId, array $doc): void {
   $name = (string)($doc['file_name'] ?? 'файл');
+  // An image sent as a file is treated as a receipt photo
+  if (str_starts_with((string)($doc['mime_type'] ?? ''), 'image/')) { bot_handle_photo($chatId, $userId, (string)$doc['file_id']); return; }
   $isPdf = ($doc['mime_type'] ?? '') === 'application/pdf' || preg_match('/\.pdf$/i', $name);
   $isText = preg_match('/\.txt$/i', $name);
   if (!$isPdf && !$isText) { telegram('sendMessage', ['chat_id' => $chatId, 'text' => 'Пришлите выписку Kaspi Gold в PDF — я разберу её и предложу импорт.']); return; }
@@ -269,6 +328,15 @@ function bot_handle_callback(array $cb): void {
         $undo = bot_keyboard($userId, ['type' => 'statement_undo', 'ids' => $res['ids'], 'linked' => $res['linked'], 'job' => (int)$p['job'], 'payer' => (int)$p['payer'], 'meta' => $meta, 'opts' => $opts], $labels, 1);
         $edit(bot_import_report($res, $entries, (int)$p['payer']), $undo);
         $answer($res['ids'] ? 'Готово' : 'Новых операций нет');
+        return;
+      case 'dep_int':
+        $key = "dep_int_done:{$p['id']}:{$p['period']}";
+        if (get_setting($key) !== null) { $edit('🏦 Проценты за этот месяц уже записаны'); $answer('Уже записано'); return; }
+        if ($opt === 'skip') { set_setting($key, 'skipped'); $edit('⏭ Проценты за этот месяц пропущены'); $answer(); return; }
+        deposit_move((int)$p['id'], 'interest', $p['amount'], 'Проценты за месяц', date('Y-m-d'), ['id' => $userId]);
+        set_setting($key, (string)$p['amount']);
+        $edit('✅ Проценты ' . fmt_money((float)$p['amount']) . ' записаны в журнал депозита');
+        $answer('Записано');
         return;
       case 'reset':
         $msg = reset_vote((int)$p['rid'], $userId, $opt === 'approve');

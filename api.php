@@ -21,7 +21,7 @@ try {
     $month = range_summary($mFrom, $mUntil);
     [$wFrom, $wUntil] = normalize_period(null, null, 'week');
     $week = range_summary($wFrom, $wUntil);
-    $recent = db()->query("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,t.telegram_id,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id ORDER BY t.occurred_on DESC,t.id DESC LIMIT 10")->fetchAll();
+    $recent = db()->query("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,t.telegram_id,t.import_account account,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id ORDER BY t.occurred_on DESC,t.id DESC LIMIT 10")->fetchAll();
     foreach ($recent as &$r) $r['group'] = category_group_of($r['category'], $r['cg'] ?: null);
     unset($r);
     json_out([
@@ -33,6 +33,8 @@ try {
       'transfers' => list_transfers(5),
       'goals' => goals_list(),
       'debts' => debts_list(),
+      'accounts' => accounts_list(),
+      'settings' => ['big_expense_threshold' => big_expense_threshold()],
       'deposits' => deposits_list(),
       'reset' => reset_status(),
       'forecast' => month_forecast(),
@@ -41,6 +43,67 @@ try {
       'limits' => limits_status((int)$member['id']),
       'category_groups' => category_groups_all(),
     ]);
+  }
+
+  if ($method === 'GET' && $action === 'account') { json_out(['operations' => account_operations((string)($_GET['name'] ?? ''))]); }
+  if ($method === 'POST' && $action === 'account_save') {
+    $d = body();
+    $old = trim((string)($d['old_name'] ?? ''));
+    if ($old !== '') account_rename($old, (string)($d['name'] ?? ''), (string)($d['kind'] ?? 'card')); else account_add((string)($d['name'] ?? ''), (string)($d['kind'] ?? 'card'));
+    json_out(['ok' => true, 'accounts' => accounts_list()]);
+  }
+  if ($method === 'POST' && $action === 'account_delete') { account_delete((string)(body()['name'] ?? '')); json_out(['ok' => true, 'accounts' => accounts_list()]); }
+  if ($method === 'POST' && $action === 'account_reconcile') {
+    $d = body();
+    $target = filter_var(str_replace([' ', "\u{00A0}", ','], ['', '', '.'], (string)($d['balance'] ?? '')), FILTER_VALIDATE_FLOAT);
+    if ($target === false) json_out(['error' => 'Введите фактический остаток'], 422);
+    $r = reconcile_account((string)($d['name'] ?? ''), (int)$member['id'], date('Y-m-d'), (float)$target, (int)$member['id']);
+    json_out(['ok' => true, 'diff' => $r['diff'], 'accounts' => accounts_list()]);
+  }
+  if ($method === 'GET' && $action === 'categories') { json_out(['items' => categories_overview()]); }
+  if ($method === 'POST' && $action === 'category_update') {
+    $d = body();
+    category_update((string)($d['name'] ?? ''), (string)($d['new_name'] ?? ''), (string)($d['group'] ?? 'variable'), $member);
+    json_out(['ok' => true, 'items' => categories_overview(), 'category_groups' => category_groups_all()]);
+  }
+  if ($method === 'POST' && $action === 'category_delete') {
+    $d = body();
+    category_delete((string)($d['name'] ?? ''), (string)($d['move_to'] ?? ''));
+    json_out(['ok' => true, 'items' => categories_overview(), 'category_groups' => category_groups_all()]);
+  }
+  if ($method === 'POST' && $action === 'settings') {
+    $d = body();
+    if (isset($d['big_expense_threshold'])) {
+      $v = (int)preg_replace('/\D/', '', (string)$d['big_expense_threshold']);
+      if ($v > 100000000) json_out(['error' => 'Слишком большая сумма'], 422);
+      set_setting('big_expense_threshold', (string)$v);
+    }
+    json_out(['ok' => true, 'settings' => ['big_expense_threshold' => big_expense_threshold()]]);
+  }
+  // Inside Telegram a download is unreliable: the bot sends the file to the member's chat instead
+  if ($method === 'POST' && $action === 'export_send') {
+    $d = body();
+    [$from, $until] = normalize_period($d['from'] ?? null, $d['to'] ?? null, 'month');
+    $fmt = in_array($d['format'] ?? '', ['xlsx', 'pdf'], true) ? $d['format'] : 'xlsx';
+    $file = $fmt === 'xlsx' ? export_xlsx($from, $until) : export_pdf($from, $until);
+    $name = 'family-budget-' . $from . '_' . (new DateTimeImmutable($until))->modify('-1 day')->format('Y-m-d') . '.' . $fmt;
+    try {
+      $r = telegram_multipart('sendDocument', ['chat_id' => (string)$member['id'], 'caption' => '📎 Отчёт за ' . (new DateTimeImmutable($from))->format('d.m.Y') . ' — ' . (new DateTimeImmutable($until))->modify('-1 day')->format('d.m.Y'),
+        'document' => new CURLFile($file, $fmt === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'application/pdf', $name)]);
+    } finally { @unlink($file); }
+    if (!($r['ok'] ?? false)) json_out(['error' => 'Не удалось отправить файл в Telegram'], 502);
+    json_out(['ok' => true]);
+  }
+  if ($method === 'GET' && ($action === 'export_xlsx' || $action === 'export_pdf')) {
+    [$from, $until] = normalize_period($_GET['from'] ?? null, $_GET['to'] ?? null, $_GET['preset'] ?? 'month');
+    $file = $action === 'export_xlsx' ? export_xlsx($from, $until) : export_pdf($from, $until);
+    $name = 'family-budget-' . $from . '_' . (new DateTimeImmutable($until))->modify('-1 day')->format('Y-m-d') . ($action === 'export_xlsx' ? '.xlsx' : '.pdf');
+    header('Content-Type: ' . ($action === 'export_xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'application/pdf'));
+    header('Content-Disposition: attachment; filename="' . $name . '"');
+    header('Content-Length: ' . filesize($file));
+    readfile($file);
+    @unlink($file);
+    exit;
   }
 
   if ($method === 'GET' && $action === 'debt') {
@@ -91,7 +154,7 @@ try {
     $page = max(1, (int)($_GET['page'] ?? 1));
     $limit = min(200, max(10, (int)($_GET['limit'] ?? 50)));
     $offset = ($page - 1) * $limit;
-    $q = db()->prepare("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,t.telegram_id,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id WHERE t.occurred_on>=? AND t.occurred_on<? ORDER BY t.occurred_on DESC,t.id DESC LIMIT $limit OFFSET $offset");
+    $q = db()->prepare("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,t.telegram_id,t.import_account account,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id WHERE t.occurred_on>=? AND t.occurred_on<? ORDER BY t.occurred_on DESC,t.id DESC LIMIT $limit OFFSET $offset");
     $q->execute([$from, $until]);
     $rows = $q->fetchAll();
     foreach ($rows as &$r) $r['group'] = category_group_of($r['category'], $r['cg'] ?: null);
@@ -107,6 +170,7 @@ try {
       'previous' => ['from'=>$pFrom,'to'=>(new DateTimeImmutable($pUntil))->modify('-1 day')->format('Y-m-d'),'expenses'=>$prev['expenses'],'topups'=>$prev['topups'],'fixed'=>$prev['fixed'],'variable'=>$prev['variable'],'count'=>$prev['count']],
       'balances' => $balances,
       'daily' => $daily,
+      'months' => months_series($until),
       'transactions' => $rows,
       'pagination' => ['page'=>$page,'limit'=>$limit,'total'=>$total,'pages'=>(int)ceil($total / $limit)],
       'category_groups' => category_groups_all(),
@@ -260,6 +324,7 @@ try {
   if ($method === 'POST' && $action === 'main') {
     $e = validate_entry(body());
     $id = insert_transaction((int)$member['id'], $e);
+    notify_big_expense($member, $e);
     // Limits never block a record; they only report where the family stands
     $limits = [];
     if ($e['kind'] === 'expense') {

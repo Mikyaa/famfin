@@ -600,7 +600,8 @@ function limit_rows(int $memberId): array {
 function category_groups_map(): array {
   global $config;
   $map = [];
-  foreach (['fixed', 'variable'] as $g) foreach ($config['category_groups'][$g] ?? [] as $c) $map[$c] = $g;
+  // Before seeding the defaults live in config; afterwards the custom_categories table is the list
+  if (get_setting('categories_seeded') === null) foreach (['fixed', 'variable'] as $g) foreach ($config['category_groups'][$g] ?? [] as $c) $map[$c] = $g;
   foreach (custom_categories() as $name => $g) if (!isset($map[$name])) $map[$name] = $g;
   foreach (db()->query("SELECT category,MAX(COALESCE(category_group,'')) cg FROM transactions WHERE kind='expense' GROUP BY category") as $r) {
     if (!isset($map[$r['category']])) $map[(string)$r['category']] = category_group_of((string)$r['category'], $r['cg'] ?: null);
@@ -870,11 +871,12 @@ function handle_bot_command(int $chatId, int $userId, string $text, string $appU
 
 function bot_send_help(int $chatId, string $appUrl): void {
   global $config;
-  $text = "Как записывать:\n• «кафе 5000» — расход, категория определится сама\n• «12 300 продукты магнум» — с комментарием\n• «вчера такси 1800» или «28.09 аптека 4500» — с датой\n• «+350 000 зарплата» — пополнение\nПосле записи можно сменить категорию или отменить кнопкой.\n\n📄 Пришлите PDF-выписку Kaspi Gold — разберу и предложу импорт покупок.\n\nКоманды:\n/balance — текущие остатки\n/week — сводка за неделю\n/month — сводка за месяц\n/limits — лимиты\n/login — код для входа на сайт\n/start — открыть приложение";
+  $text = "Как записывать:\n• «кафе 5000» — расход, категория определится сама\n• «12 300 продукты магнум» — с комментарием\n• «вчера такси 1800» или «28.09 аптека 4500» — с датой\n• «+350 000 зарплата» — пополнение\nПосле записи можно сменить категорию или отменить кнопкой.\n\n🧾 Пришлите фото QR-кода с чека или ссылку из него — сумма и дата подставятся сами.\n❓ Спросите: «сколько потратили на продукты в сентябре?», «кто больше тратит?», «сравни этот месяц с прошлым».\n\n📄 Пришлите PDF-выписку Kaspi Gold — разберу и предложу импорт покупок.\n\nКоманды:\n/balance — текущие остатки\n/week — сводка за неделю\n/month — сводка за месяц\n/limits — лимиты\n/login — код для входа на сайт\n/start — открыть приложение";
   if (!empty($config['backup_chat_id'])) $text .= "\n/backup — резервная копия (только владельцу)";
   telegram('sendMessage', ['chat_id' => $chatId, 'text' => $text, 'reply_markup' => ['inline_keyboard' => [[['text' => 'Открыть бюджет', 'web_app' => ['url' => $appUrl]]]]]]);
 }
 
 require __DIR__ . '/features.php';
 require __DIR__ . '/bot.php';
+require __DIR__ . '/extras.php';
 

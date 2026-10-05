@@ -4,11 +4,12 @@ Options -Indexes
   Require all denied
 </FilesMatch>
 
-<FilesMatch "^(config(\.example)?\.php|lib\.php|router\.php|polling\.php|weekly_report\.php|report_image\.php|widget_update\.php|features\.php|bot\.php|backup\.php|daily\.php|statement_worker\.php|import_statement\.php|\.gitignore|\.env.*)$">
+<FilesMatch "^(config(\.example)?\.php|lib\.php|router\.php|polling\.php|weekly_report\.php|report_image\.php|widget_update\.php|features\.php|bot\.php|backup\.php|daily\.php|statement_worker\.php|extras\.php|import_statement\.php|\.gitignore|\.env.*)$">
   Require all denied
 </FilesMatch>
 
 RedirectMatch 403 ^/storage(/|$)
+RedirectMatch 403 ^/tools(/|$)
 
 <IfModule mod_headers.c>
   Header set X-Content-Type-Options "nosniff"
