@@ -10,6 +10,7 @@ function body(): array {
 try {
   $member = auth_member();
   save_member($member);
+  set_actor((int)$member['id']);
   $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
   $action = $_GET['action'] ?? 'main';
 
@@ -21,7 +22,7 @@ try {
     $month = range_summary($mFrom, $mUntil);
     [$wFrom, $wUntil] = normalize_period(null, null, 'week');
     $week = range_summary($wFrom, $wUntil);
-    $recent = db()->query("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,t.telegram_id,t.import_account account,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id ORDER BY t.occurred_on DESC,t.id DESC LIMIT 10")->fetchAll();
+    $recent = db()->query("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,t.telegram_id,t.import_account account,t.orig_amount,t.orig_currency,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id ORDER BY t.occurred_on DESC,t.id DESC LIMIT 10")->fetchAll();
     foreach ($recent as &$r) $r['group'] = category_group_of($r['category'], $r['cg'] ?: null);
     unset($r);
     json_out([
@@ -42,7 +43,44 @@ try {
       'members' => array_map(fn($id, $name) => ['id' => $id, 'name' => $name], array_keys(allowed_members_map()), allowed_members_map()),
       'limits' => limits_status((int)$member['id']),
       'category_groups' => category_groups_all(),
+      'shopping_left' => count(array_filter(shopping_list(), fn($i) => !$i['done'])),
+      'plan' => plan_brief(),
+      'fx' => fx_rates(),
     ]);
+  }
+
+  /* ----- wave 3: log, trash, plan, calendar, subscriptions, shopping, Siri, year ----- */
+  if ($method === 'GET' && $action === 'audit') { json_out(['items' => audit_list()]); }
+  if ($method === 'GET' && $action === 'trash') { json_out(['items' => trash_list()]); }
+  if ($method === 'POST' && $action === 'trash_restore') { $s = trash_restore((int)(body()['id'] ?? 0)); json_out(['ok' => true, 'restored' => $s, 'items' => trash_list()]); }
+  if ($method === 'GET' && $action === 'plan') { json_out(plan_status((string)($_GET['period'] ?? date('Y-m'))) + ['categories' => array_keys(category_groups_map())]); }
+  if ($method === 'POST' && $action === 'plan_save') {
+    $d = body();
+    $period = (string)($d['period'] ?? date('Y-m'));
+    if (!empty($d['copy_previous'])) plan_copy_previous($period); else plan_save($period, is_array($d['items'] ?? null) ? $d['items'] : []);
+    json_out(['ok' => true] + plan_status($period) + ['categories' => array_keys(category_groups_map())]);
+  }
+  if ($method === 'GET' && $action === 'calendar') { json_out(month_calendar((string)($_GET['month'] ?? date('Y-m')))); }
+  if ($method === 'GET' && $action === 'subscriptions') { json_out(['items' => find_subscriptions()]); }
+  if ($method === 'GET' && $action === 'shopping') { json_out(['items' => shopping_list()]); }
+  if ($method === 'POST' && $action === 'shopping') {
+    $d = body();
+    $op = (string)($d['op'] ?? '');
+    if ($op === 'add') shopping_add((string)($d['text'] ?? ''), (int)$member['id']);
+    elseif ($op === 'toggle') shopping_toggle((int)($d['id'] ?? 0));
+    elseif ($op === 'delete') shopping_delete((int)($d['id'] ?? 0));
+    elseif ($op === 'clear') shopping_clear_done();
+    json_out(['ok' => true, 'items' => shopping_list()]);
+  }
+  if ($method === 'GET' && $action === 'quick_token') {
+    $t = quick_token((int)$member['id'], ($_GET['renew'] ?? '') === '1');
+    json_out(['url' => rtrim($config['app_url'], '/') . '/quick.php?t=' . $t]);
+  }
+  if ($method === 'POST' && $action === 'year_send') {
+    $y = (int)(body()['year'] ?? date('Y'));
+    if ($y < 2000 || $y > (int)date('Y')) json_out(['error' => 'Неверный год'], 422);
+    send_year_summary($y, [(int)$member['id']]);
+    json_out(['ok' => true]);
   }
 
   if ($method === 'GET' && $action === 'account') { json_out(['operations' => account_operations((string)($_GET['name'] ?? ''))]); }
@@ -154,7 +192,7 @@ try {
     $page = max(1, (int)($_GET['page'] ?? 1));
     $limit = min(200, max(10, (int)($_GET['limit'] ?? 50)));
     $offset = ($page - 1) * $limit;
-    $q = db()->prepare("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,t.telegram_id,t.import_account account,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id WHERE t.occurred_on>=? AND t.occurred_on<? ORDER BY t.occurred_on DESC,t.id DESC LIMIT $limit OFFSET $offset");
+    $q = db()->prepare("SELECT t.id,t.kind,t.amount,t.category,COALESCE(t.category_group,'') cg,t.note,t.occurred_on,t.telegram_id,t.import_account account,t.orig_amount,t.orig_currency,m.display_name FROM transactions t JOIN members m ON m.telegram_id=t.telegram_id WHERE t.occurred_on>=? AND t.occurred_on<? ORDER BY t.occurred_on DESC,t.id DESC LIMIT $limit OFFSET $offset");
     $q->execute([$from, $until]);
     $rows = $q->fetchAll();
     foreach ($rows as &$r) $r['group'] = category_group_of($r['category'], $r['cg'] ?: null);

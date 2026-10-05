@@ -21,6 +21,7 @@ function extras_schema(PDO $pdo): void {
     foreach (['fixed', 'variable'] as $g) foreach ($config['category_groups'][$g] ?? [] as $c) $ins->execute([$c, $g]);
     $pdo->prepare(is_sqlite() ? "INSERT OR REPLACE INTO settings(k,v) VALUES('categories_seeded','1')" : "REPLACE INTO settings(k,v) VALUES('categories_seeded','1')")->execute();
   }
+  planner_schema($pdo);
 }
 
 /* ========== ACCOUNTS ========== */
@@ -182,8 +183,8 @@ function send_deposit_interest_suggestions(): int {
     $est = deposit_interest_estimate($dep);
     if ($est < 1 || get_setting("dep_int_offer:{$dep['id']}:$period") !== null) continue;
     foreach ($config['allowed_users'] as $uid) {
-      $markup = bot_keyboard($uid, ['type' => 'dep_int', 'id' => $dep['id'], 'amount' => $est, 'period' => $period, 'opts' => ['record', 'skip']], ['✅ Записать ' . fmt_money($est), '⏭ Пропустить']);
-      send_member_message($uid, "🏦 Проценты по депозиту «{$dep['title']}»" . ($dep['bank'] ? " ({$dep['bank']})" : '') . "\nПо ставке " . str_replace('.', ',', (string)$dep['rate']) . "% за месяц примерно " . fmt_money($est) . ". Записать в журнал?\nЕсли банк начислил другую сумму — внесите её в приложении.", $markup);
+      $markup = bot_keyboard($uid, ['type' => 'dep_int', 'id' => $dep['id'], 'amount' => $est, 'period' => $period, 'opts' => ['record', 'skip']], ['✅ Записать ' . fmt_cur($est, $dep['currency']), '⏭ Пропустить']);
+      send_member_message($uid, "🏦 Проценты по депозиту «{$dep['title']}»" . ($dep['bank'] ? " ({$dep['bank']})" : '') . "\nПо ставке " . str_replace('.', ',', (string)$dep['rate']) . "% за месяц примерно " . fmt_cur($est, $dep['currency']) . ". Записать в журнал?\nЕсли банк начислил другую сумму — внесите её в приложении.", $markup);
     }
     set_setting("dep_int_offer:{$dep['id']}:$period", date('Y-m-d'));
     $sent++;
@@ -414,7 +415,7 @@ function ai_answer(string $question, int $userId): ?string {
     'balance' => ['shared' => round($b['shared']['balance']), 'members' => array_column(array_map(fn($m) => ['n' => $m['name'], 'b' => round($m['balance'])], $b['members']), 'b', 'n')],
     'limits' => array_map(fn($l) => ['category' => $l['label'], 'period' => $l['period'], 'limit' => $l['limit'], 'spent' => $l['spent']], limits_status($userId)['items']),
     'debts' => array_map(fn($d) => ['person' => $d['person'], 'direction' => $d['direction'], 'amount' => $d['amount']], debts_list()),
-    'deposits' => array_map(fn($d) => ['title' => $d['title'], 'amount' => $d['amount'], 'rate' => $d['rate']], deposits_list())];
+    'deposits' => array_map(fn($d) => ['title' => $d['title'], 'amount' => $d['amount_kzt'], 'rate' => $d['rate']], deposits_list())];
   $client = new \Anthropic\Client(apiKey: $config['anthropic_api_key']);
   $message = $client->messages->create(
     model: $config['anthropic_model'] ?? 'claude-opus-5-5',

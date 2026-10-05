@@ -23,6 +23,14 @@ if (!in_array($id, $config['allowed_users'], true) || !$chat) { echo 'ok'; exit;
 
 $name = trim(($from['first_name'] ?? '') . ' ' . ($from['last_name'] ?? ''));
 save_member(['id'=>$id,'name'=>user_label($id, $name)]);
+set_actor($id);
+
+if (isset($m['voice']) || isset($m['audio'])) {
+  $v = $m['voice'] ?? $m['audio'];
+  try { bot_handle_voice((int)$chat, $id, $v); } catch (Throwable $e) { error_log((string)$e); }
+  echo 'ok';
+  exit;
+}
 
 if (isset($m['photo']) && is_array($m['photo'])) {
   $largest = end($m['photo']);

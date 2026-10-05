@@ -13,6 +13,8 @@ return [
   // Receipt photos: node + jsqr/jimp installed in tools_dir (npm install jsqr jimp)
   'node_path' => '/path/to/node',
   'tools_dir' => '/path/to/famfin-tools',
+  // Voice messages: python venv with vosk + imageio-ffmpeg in tools_dir/venv and a Russian model
+  'vosk_model' => '/path/to/famfin-tools/vosk-model-small-ru-0.22',
   // Optional: answers to free-form questions by Claude (composer require anthropic-ai/sdk in that folder)
   'anthropic_api_key' => '',
   'anthropic_autoload' => '/path/to/famfin-lib/vendor/autoload.php',

@@ -853,6 +853,14 @@ function handle_bot_command(int $chatId, int $userId, string $text, string $appU
       $b = make_backup();
       send_backup((string)$chatId, $b);
       break;
+    case '/list':
+      bot_send_shopping($chatId, $userId);
+      break;
+    case '/year':
+      $arg = (int)(explode(' ', trim($text))[1] ?? 0);
+      $year = $arg >= 2000 && $arg <= (int)date('Y') ? $arg : (int)date('Y');
+      send_year_summary($year, [$chatId]);
+      break;
     case '/help':
     case '/add':
       bot_send_help($chatId, $appUrl);
@@ -871,7 +879,7 @@ function handle_bot_command(int $chatId, int $userId, string $text, string $appU
 
 function bot_send_help(int $chatId, string $appUrl): void {
   global $config;
-  $text = "Как записывать:\n• «кафе 5000» — расход, категория определится сама\n• «12 300 продукты магнум» — с комментарием\n• «вчера такси 1800» или «28.09 аптека 4500» — с датой\n• «+350 000 зарплата» — пополнение\nПосле записи можно сменить категорию или отменить кнопкой.\n\n🧾 Пришлите фото QR-кода с чека или ссылку из него — сумма и дата подставятся сами.\n❓ Спросите: «сколько потратили на продукты в сентябре?», «кто больше тратит?», «сравни этот месяц с прошлым».\n\n📄 Пришлите PDF-выписку Kaspi Gold — разберу и предложу импорт покупок.\n\nКоманды:\n/balance — текущие остатки\n/week — сводка за неделю\n/month — сводка за месяц\n/limits — лимиты\n/login — код для входа на сайт\n/start — открыть приложение";
+  $text = "Как записывать:\n• «кафе 5000» — расход, категория определится сама\n• «12 300 продукты магнум» — с комментарием\n• «вчера такси 1800» или «28.09 аптека 4500» — с датой\n• «+350 000 зарплата» — пополнение\nПосле записи можно сменить категорию или отменить кнопкой.\n\n🧾 Пришлите фото QR-кода с чека или ссылку из него — сумма и дата подставятся сами.\n❓ Спросите: «сколько потратили на продукты в сентябре?», «кто больше тратит?», «сравни этот месяц с прошлым».\n\n🎤 Можно надиктовать голосовым: «кафе пять тысяч».\n💵 Валюта: «кофе 5$», «отель 120 евро», «500 руб» — пересчитаю по курсу Нацбанка.\n🛒 «купить молоко, хлеб» — в общий список покупок.\n\n📄 Пришлите PDF-выписку Kaspi Gold — разберу и предложу импорт покупок.\n\nКоманды:\n/balance — текущие остатки\n/week — сводка за неделю\n/month — сводка за месяц\n/limits — лимиты\n/list — список покупок\n/year — итоги года\n/login — код для входа на сайт\n/start — открыть приложение";
   if (!empty($config['backup_chat_id'])) $text .= "\n/backup — резервная копия (только владельцу)";
   telegram('sendMessage', ['chat_id' => $chatId, 'text' => $text, 'reply_markup' => ['inline_keyboard' => [[['text' => 'Открыть бюджет', 'web_app' => ['url' => $appUrl]]]]]]);
 }
@@ -879,4 +887,5 @@ function bot_send_help(int $chatId, string $appUrl): void {
 require __DIR__ . '/features.php';
 require __DIR__ . '/bot.php';
 require __DIR__ . '/extras.php';
+require __DIR__ . '/planner.php';
 

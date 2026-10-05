@@ -156,6 +156,18 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
         <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10 12 4l9 6M5 10v8M9.5 10v8M14.5 10v8M19 10v8M3 20h18"/></svg></span>
         <span class="panel-text"><b>Депозиты</b><small id="depositTileSub">Добавить депозит</small></span>
       </button>
+      <button type="button" class="panel-tile" id="shopOpen" aria-label="Покупки: открыть">
+        <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h2l2 10h10l2-7H7M10 19.5h.01M17 19.5h.01"/></svg></span>
+        <span class="panel-text"><b>Покупки</b><small id="shopTileSub">Общий список</small></span>
+      </button>
+      <button type="button" class="panel-tile" id="planOpen" aria-label="План на месяц: открыть">
+        <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v13H4zM4 10h16M9 14h6"/></svg></span>
+        <span class="panel-text"><b>План</b><small id="planTileSub">Распределить доход</small></span>
+      </button>
+      <button type="button" class="panel-tile" id="calendarOpen" aria-label="Календарь: открыть">
+        <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v14H4zM4 10h16M8 3v4M16 3v4M8 14h2M14 14h2M8 17h2"/></svg></span>
+        <span class="panel-text"><b>Календарь</b><small id="calendarTileSub">Платежи месяца</small></span>
+      </button>
     </div>
 
     <div class="section" id="limitsSection">
@@ -207,6 +219,7 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
     <div class="section">
       <div class="section-title"><h2>По месяцам</h2><span class="muted">расходы</span></div>
       <div id="monthsChart" class="card months-chart"></div>
+      <button type="button" class="secondary-button year-send" id="yearSend" hidden>🎉 Итоги года — прислать в Telegram</button>
     </div>
 
     <div class="section">
@@ -290,8 +303,9 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
 
       <div class="amount-block">
         <input id="amountInput" type="text" inputmode="decimal" placeholder="0" autocomplete="off">
-        <span class="amount-currency" id="sheetCurrency">₸</span>
+        <button type="button" class="amount-currency" id="sheetCurrency" aria-label="Сменить валюту">₸</button>
       </div>
+      <div class="fx-hint" id="fxHint" hidden></div>
 
       <div class="quick-row" id="quickAmounts">
         <button data-add="500">+500</button>
@@ -421,6 +435,16 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
         <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12V4h8l9 9-8 8-9-9zM7.5 7.5h.01"/></svg></span>
         <span class="panel-text"><b>Категории</b><small>Переименовать, удалить, сменить группу</small></span>
       </button>
+      <div class="panel-tiles profile-tiles">
+        <button type="button" class="panel-tile" id="auditOpen">
+          <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v4l3 2M3.5 12a8.5 8.5 0 1 0 2.5-6M3 4v4h4"/></svg></span>
+          <span class="panel-text"><b>Журнал</b><small>Кто что менял</small></span>
+        </button>
+        <button type="button" class="panel-tile" id="trashOpen">
+          <span class="panel-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M10 7V4h4v3M6 7l1 13h10l1-13"/></svg></span>
+          <span class="panel-text"><b>Корзина</b><small>Вернуть удалённое</small></span>
+        </button>
+      </div>
 
       <div>
         <h3 class="profile-section-title">Уведомления</h3>
@@ -437,11 +461,36 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
         </div>
       </div>
 
+      <div>
+        <h3 class="profile-section-title">Siri и быстрый ввод</h3>
+        <p class="limits-help">Скажите «Привет, Siri, трата» и продиктуйте «кафе пять тысяч». Ссылка личная: записи будут от вашего имени.</p>
+        <button type="button" class="secondary-button" id="siriSetup">Настроить Siri</button>
+        <div class="siri-box" id="siriBox" hidden>
+          <ol class="siri-steps">
+            <li>Откройте «Команды» → «+» и назовите команду «Трата».</li>
+            <li>Добавьте действие «Диктовать текст».</li>
+            <li>Добавьте «Получить содержимое URL»: вставьте ссылку ниже, метод <b>POST</b>, тело запроса — «Форма», поле <b>text</b> = «Продиктованный текст».</li>
+            <li>Добавьте «Показать результат» — Siri прочитает ответ.</li>
+          </ol>
+          <div class="siri-url" id="siriUrl"></div>
+          <div class="siri-actions">
+            <button type="button" class="secondary-button" id="siriCopy">Скопировать ссылку</button>
+            <button type="button" class="text-button" id="siriRenew">Новая ссылка</button>
+          </div>
+          <p class="field-help">Голосовые сообщения боту тоже работают: просто наговорите «такси две тысячи».</p>
+        </div>
+      </div>
+
       <div id="recurringBlock">
         <h3 class="profile-section-title">Регулярные платежи</h3>
         <p class="limits-help">Кредиты, коммуналка, подписки. В нужный день бот напомнит, а записать платёж можно одной кнопкой.</p>
         <div id="recurringList" class="recurring-list"></div>
         <button type="button" class="secondary-button" id="recurringAdd">+ Добавить платёж</button>
+        <div id="subsBlock" hidden>
+          <div class="limit-group-title">Похоже на подписки</div>
+          <p class="limits-help">Эти списания повторяются каждый месяц. Добавьте их в регулярные — бот будет напоминать.</p>
+          <div id="subsList" class="debts-list"></div>
+        </div>
       </div>
 
       <div>
@@ -736,11 +785,94 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
     <div class="cat-form">
       <label>Название<input id="depositName" maxlength="80" placeholder="Например, На квартиру" autocomplete="off"></label>
       <label>Банк <span class="optional">необязательно</span><input id="depositBank" maxlength="80" placeholder="Kaspi, Halyk, Freedom…" autocomplete="off"></label>
-      <label id="depositAmountLabel">Сумма при открытии, ₸ <span class="optional">необязательно</span><input id="depositAmount" inputmode="numeric" placeholder="1 000 000" autocomplete="off"></label>
+      <div id="depositCurrencyRow"><div class="field-label">Валюта</div>
+        <div class="group-toggle four" id="depositCurrency">
+          <button type="button" data-cur="KZT" class="selected">₸</button><button type="button" data-cur="USD">$</button><button type="button" data-cur="EUR">€</button><button type="button" data-cur="RUB">₽</button>
+        </div></div>
+      <label id="depositAmountLabel">Сумма при открытии <span class="optional">необязательно</span><input id="depositAmount" inputmode="numeric" placeholder="1 000 000" autocomplete="off"></label>
       <label>Ставка, % годовых <span class="optional">необязательно</span><input id="depositRate" inputmode="decimal" placeholder="14,5" autocomplete="off"></label>
       <label>Комментарий <span class="optional">необязательно</span><input id="depositNote" maxlength="300" autocomplete="off"></label>
       <button id="depositSave" class="sheet-submit" type="button">Сохранить</button>
       <button id="depositDelete" class="sheet-delete" type="button" hidden>Удалить депозит</button>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="shopSheet" hidden>
+  <div class="sheet-backdrop" data-layer-close></div>
+  <div class="sheet-content" role="dialog" aria-labelledby="shopTitle">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header"><h2 id="shopTitle">Список покупок</h2><button class="sheet-close" data-layer-close aria-label="Закрыть">×</button></div>
+    <div class="sheet-body">
+      <div class="shop-add">
+        <input id="shopInput" class="note-input" maxlength="300" placeholder="Молоко, хлеб, яйца" autocomplete="off" aria-label="Что купить">
+        <button type="button" class="sheet-submit" id="shopAddBtn">Добавить</button>
+      </div>
+      <div id="shopList" class="shop-list"></div>
+      <div class="shop-actions" id="shopActions" hidden>
+        <button type="button" class="sheet-submit" id="shopRecord">Записать как трату</button>
+        <button type="button" class="secondary-button" id="shopClear">Убрать купленное</button>
+      </div>
+      <p class="field-help">Список общий: второй участник видит его сразу. В боте — «купить молоко, хлеб» и /list.</p>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="planSheet" hidden>
+  <div class="sheet-backdrop" data-layer-close></div>
+  <div class="sheet-content" role="dialog" aria-labelledby="planTitle">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header"><h2 id="planTitle">План на месяц</h2><button class="sheet-close" data-layer-close aria-label="Закрыть">×</button></div>
+    <div class="sheet-body">
+      <div class="month-stepper"><button type="button" id="planPrev" aria-label="Прошлый месяц">‹</button><b id="planMonth">—</b><button type="button" id="planNext" aria-label="Следующий месяц">›</button></div>
+      <div class="plan-summary" id="planSummary"></div>
+      <div id="planList" class="plan-list"></div>
+      <div class="plan-edit" id="planEdit" hidden>
+        <p class="limits-help">Сколько готовы потратить на каждую категорию в этом месяце. Пустое поле — без плана.</p>
+        <div id="planForm" class="limit-form"></div>
+        <button type="button" class="sheet-submit" id="planSave">Сохранить план</button>
+      </div>
+      <div class="plan-buttons" id="planButtons">
+        <button type="button" class="sheet-submit" id="planEditBtn">Распределить</button>
+        <button type="button" class="secondary-button" id="planCopy">Как в прошлом месяце</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="calendarSheet" hidden>
+  <div class="sheet-backdrop" data-layer-close></div>
+  <div class="sheet-content" role="dialog" aria-labelledby="calendarTitle">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header"><h2 id="calendarTitle">Календарь</h2><button class="sheet-close" data-layer-close aria-label="Закрыть">×</button></div>
+    <div class="sheet-body">
+      <div class="month-stepper"><button type="button" id="calPrevM" aria-label="Прошлый месяц">‹</button><b id="calMonthTitle">—</b><button type="button" id="calNextM" aria-label="Следующий месяц">›</button></div>
+      <div class="mcal-week"><span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span></div>
+      <div class="mcal" id="mcalGrid"></div>
+      <div class="mcal-legend"><span><i class="ev-neg"></i>платёж</span><span><i class="ev-pos"></i>доход</span><span><i class="ev-goal"></i>цель</span></div>
+      <div class="limit-group-title" id="mcalDayTitle">События месяца</div>
+      <div id="mcalEvents" class="journal"></div>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="auditSheet" hidden>
+  <div class="sheet-backdrop" data-layer-close></div>
+  <div class="sheet-content" role="dialog" aria-labelledby="auditTitle">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header"><h2 id="auditTitle">Журнал изменений</h2><button class="sheet-close" data-layer-close aria-label="Закрыть">×</button></div>
+    <div class="sheet-body"><div id="auditList" class="journal"></div></div>
+  </div>
+</div>
+
+<div class="sheet" id="trashSheet" hidden>
+  <div class="sheet-backdrop" data-layer-close></div>
+  <div class="sheet-content" role="dialog" aria-labelledby="trashTitle">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header"><h2 id="trashTitle">Корзина</h2><button class="sheet-close" data-layer-close aria-label="Закрыть">×</button></div>
+    <div class="sheet-body">
+      <p class="limits-help">Удалённые операции и переводы хранятся 30 дней — их можно вернуть.</p>
+      <div id="trashList" class="journal"></div>
     </div>
   </div>
 </div>

@@ -35,9 +35,22 @@ function period_report_data(string $fromIso, string $untilIso): array {
   $cats = [];
   foreach ($s['categories'] as $name => $c) $cats[] = ['name' => (string)$name, 'total' => $c['total'], 'group' => $c['group']];
   $days = (int)$from->diff($until)->days;
+  // Long periods are drawn by month: 365 thin day bars say nothing
+  $unit = 'day';
+  if ($days > 62) {
+    $unit = 'month';
+    $byMonth = [];
+    for ($m = $from->modify('first day of this month'); $m < $until; $m = $m->modify('+1 month')) $byMonth[$m->format('Y-m')] = ['date' => $m->format('Y-m-01'), 'expense' => 0.0, 'topup' => 0.0];
+    $q = db()->prepare('SELECT substr(occurred_on,1,7) ym,kind,SUM(amount) t FROM transactions WHERE occurred_on>=? AND occurred_on<? GROUP BY ym,kind');
+    $q->execute([$from->format('Y-m-d'), $until->format('Y-m-d')]);
+    foreach ($q as $r) if (isset($byMonth[$r['ym']])) $byMonth[$r['ym']][$r['kind'] === 'expense' ? 'expense' : 'topup'] += (float)$r['t'];
+    $daily = array_values($byMonth);
+  }
+  $isYear = $from->format('m-d') === '01-01' && $until->format('m-d') === '01-01' && $days >= 365;
   return [
-    'title' => $days === 7 && $from->format('N') === '1' ? 'Итоги недели' : ($from->format('d') === '01' && $until->format('d') === '01' && $days <= 31 ? 'Итоги месяца' : 'Итоги периода'),
-    'span' => $days === 7 ? 'за неделю' : ($days <= 31 ? 'за месяц' : 'за период'),
+    'unit' => $unit,
+    'title' => $isYear ? 'Итоги ' . $from->format('Y') . ' года' : ($days === 7 && $from->format('N') === '1' ? 'Итоги недели' : ($from->format('d') === '01' && $until->format('d') === '01' && $days <= 31 ? 'Итоги месяца' : 'Итоги периода')),
+    'span' => $isYear ? 'за год' : ($days === 7 ? 'за неделю' : ($days <= 31 ? 'за месяц' : 'за период')),
     'from' => $from->format('Y-m-d'),
     'to' => $until->modify('-1 day')->format('Y-m-d'),
     'expenses' => $s['expenses'],
@@ -167,7 +180,8 @@ function render_weekly_report_png(array $d, string $file): void {
   $c->text('Потрачено ' . ($d['span'] ?? 'за неделю'), $P + 44, $y + 210, 26, '#A9B0BE');
   $c->text(wr_money($d['expenses']), $P + 44, $y + 300, 84, '#FFFFFF', 'SemiBold');
   $days = max(1, count($d['daily']));
-  $stats = [['Пополнения', wr_money($d['topups'], true)], ['В среднем в день', wr_money($d['expenses'] / $days)], ['Операций', (string)$d['count']]];
+  $byMonth = ($d['unit'] ?? 'day') === 'month';
+  $stats = [['Пополнения', wr_money($d['topups'], true)], [$byMonth ? 'В среднем в месяц' : 'В среднем в день', wr_money($d['expenses'] / $days)], ['Операций', (string)$d['count']]];
   $sx = $P + 44;
   foreach ($stats as [$label, $val]) {
     $c->text($label, $sx, $y + 380, 22, '#A9B0BE');
@@ -190,7 +204,7 @@ function render_weekly_report_png(array $d, string $file): void {
 
   // Daily bars
   $c->rrect($P, $y, $cardW, $hDays, 36, '#FFFFFF');
-  $c->text('По дням', $P + 40, $y + 62, 30, $ink, 'SemiBold');
+  $c->text($byMonth ? 'По месяцам' : 'По дням', $P + 40, $y + 62, 30, $ink, 'SemiBold');
   $max = max(1, ...array_map(fn($x) => $x['expense'], $d['daily']));
   $n = max(1, count($d['daily']));
   $chartTop = $y + 120; $chartH = 190; $colW = ($cardW - 80) / $n;
@@ -202,6 +216,12 @@ function render_weekly_report_png(array $d, string $file): void {
     if ($n <= 7) $c->rrect($cx + $pad, $chartTop, $colW - 2 * $pad, $chartH, $r, $track);
     $isMax = $day['expense'] == $max && $day['expense'] > 0;
     $c->rrect($cx + $pad, $chartTop + $chartH - $bh, $colW - 2 * $pad, $bh, $r, $isMax ? '#2134C0' : '#2A62EC');
+    if ($byMonth) {
+      if ($isMax) $c->text(wr_money($day['expense']), min($P + $cardW - 120, max($P + 120, $cx + $colW / 2)), $chartTop + $chartH - $bh - 12, 20, $ink, 'SemiBold', 'center');
+      $mn = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'][(int)substr($day['date'], 5, 2) - 1];
+      $c->text($mn, $cx + $colW / 2, $chartTop + $chartH + 46, 20, $muted, 'Regular', 'center');
+      continue;
+    }
     if ($n > 7) {
       // Long periods: label only the busiest day and every 5th date
       if ($isMax) $c->text(wr_money($day['expense']), min($P + $cardW - 120, max($P + 120, $cx + $colW / 2)), $chartTop + $chartH - $bh - 12, 20, $ink, 'SemiBold', 'center');

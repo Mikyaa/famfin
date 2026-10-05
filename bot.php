@@ -55,6 +55,8 @@ function parse_entry_text(string $text): ?array {
     if (!valid_date($cand)) return null;
     $date = $cand;
   }
+  $currency = 'KZT';
+  foreach (FX_PATTERNS as $code => $re) if ($consume($re)) { $currency = $code; break; }
   $plus = (bool)preg_match('/^\+/u', $t);
   $m = $consume('/(?<![\d.,])\+?(\d{1,3}(?:[ \x{00A0}]\d{3})+|\d+)(?:[.,](\d{1,2}))?\s*(к|k|тыс\.?|тысяч[аи]?)?(?=[\s₸]|тг|тенге|$)/u');
   if (!$m) return null;
@@ -67,12 +69,12 @@ function parse_entry_text(string $text): ?array {
   $topup = $plus || preg_match('/зарплат|пополн|доход|аванс|преми|кэшбэк|кешбэк|cashback/u', $t);
   if ($topup) {
     $category = str_contains($t, 'зарплат') ? 'Зарплата' : 'Пополнение';
-    return ['kind' => 'topup', 'amount' => round($amount, 2), 'category' => $category, 'note' => $orig, 'date' => $date];
+    return ['kind' => 'topup', 'amount' => round($amount, 2), 'category' => $category, 'note' => $orig, 'date' => $date, 'currency' => $currency];
   }
   $category = $t !== '' ? categorize_text($t) : null;
   // The words that only name the category are not worth keeping as a note
   $note = ($category !== null && $orig !== '' && mb_stripos($category, $orig) === 0) ? '' : $orig;
-  return ['kind' => 'expense', 'amount' => round($amount, 2), 'category' => $category, 'note' => mb_substr($note, 0, 500), 'date' => $date];
+  return ['kind' => 'expense', 'amount' => round($amount, 2), 'category' => $category, 'note' => mb_substr($note, 0, 500), 'date' => $date, 'currency' => $currency];
 }
 
 /* ========== MESSAGES ========== */
@@ -82,6 +84,7 @@ function bot_entry_text(array $e, string $who, string $head = '✅ Записа�
   $d = new DateTimeImmutable($e['date']);
   $day = $e['date'] === date('Y-m-d') ? 'сегодня' : ($e['date'] === date('Y-m-d', strtotime('-1 day')) ? 'вчера' : $d->format('d.m.Y'));
   $text = "$head $kind: {$e['category']} $sign" . fmt_money((float)$e['amount']);
+  if (!empty($e['orig_currency'])) $text .= ' (' . fmt_cur((float)$e['orig_amount'], $e['orig_currency']) . ' по курсу НБ РК)';
   if (($e['note'] ?? '') !== '') $text .= "\n📝 " . $e['note'];
   return $text . "\n👤 $who · $day";
 }
@@ -107,6 +110,13 @@ function bot_tx_markup(int $userId, int $txId): array {
 
 /* ========== TEXT ENTRY ========== */
 function bot_handle_text(int $chatId, int $userId, string $text): bool {
+  // "купить молоко, хлеб" → shopping list
+  if (preg_match('/^(?:купить|в список|список)\s*:?\s+(.+)$/isu', trim($text), $m)) {
+    $added = shopping_add($m[1], $userId);
+    telegram('sendMessage', ['chat_id' => $chatId, 'text' => $added ? '🛒 Добавил в список покупок: ' . implode(', ', $added) . "
+/list — весь список" : 'Не понял, что добавить']);
+    return true;
+  }
   // A link from a fiscal receipt's QR
   if ($receipt = parse_receipt_url($text)) { bot_offer_receipt($chatId, $userId, $receipt); return true; }
   // A question about the budget ("сколько потратили на кафе в сентябре?")
@@ -120,7 +130,7 @@ function bot_handle_text(int $chatId, int $userId, string $text): bool {
   if ($e['category'] === null) {
     $labels = bot_category_labels('expense');
     $markup = bot_keyboard($userId, ['type' => 'draft', 'entry' => $e, 'opts' => array_merge($labels, ['__cancel'])], array_merge($labels, ['✖️ Не записывать']));
-    telegram('sendMessage', ['chat_id' => $chatId, 'text' => 'Куда отнести ' . fmt_money($e['amount']) . ($e['note'] !== '' ? " («{$e['note']}»)" : '') . '?', 'reply_markup' => $markup]);
+    telegram('sendMessage', ['chat_id' => $chatId, 'text' => 'Куда отнести ' . fmt_cur($e['amount'], $e['currency'] ?? 'KZT') . ($e['note'] !== '' ? " («{$e['note']}»)" : '') . '?', 'reply_markup' => $markup]);
     return true;
   }
   $saved = bot_save_entry($userId, $e);
@@ -246,6 +256,7 @@ function bot_handle_callback(array $cb): void {
   $p = bot_action_get((int)$m[1]);
   $opt = $p['opts'][(int)$m[2]] ?? null;
   if (!$p || $opt === null) { $answer('Кнопка устарела'); return; }
+  set_actor($userId);
   $edit = function(string $text, ?array $markup = null) use ($chatId, $msgId) {
     $payload = ['chat_id' => $chatId, 'message_id' => $msgId, 'text' => $text];
     if ($markup) $payload['reply_markup'] = $markup;
@@ -337,6 +348,13 @@ function bot_handle_callback(array $cb): void {
         set_setting($key, (string)$p['amount']);
         $edit('✅ Проценты ' . fmt_money((float)$p['amount']) . ' записаны в журнал депозита');
         $answer('Записано');
+        return;
+      case 'shop':
+        if ($opt === 'clear') { $done = shopping_clear_done(); $answer($done ? 'Убрал купленное' : 'Купленного нет'); }
+        elseif ($opt !== 'refresh') { shopping_toggle((int)$opt); $answer(); }
+        else $answer();
+        [$text, $markup] = shopping_message($userId);
+        $edit($text, $markup);
         return;
       case 'reset':
         $msg = reset_vote((int)$p['rid'], $userId, $opt === 'approve');

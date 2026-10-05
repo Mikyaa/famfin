@@ -736,3 +736,69 @@ button.group-row:active,button.category-row:active{background:var(--bg)}
 .share-item small{text-align:right;color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums}
 #depositForecast{margin:-6px 2px 0}
 .cat-form .danger-zone label{text-transform:none;letter-spacing:0}
+
+/* ===== Wave 3: currency, shopping, plan, calendar, log, Siri ===== */
+button.amount-currency{border:0;background:var(--strong);border-radius:var(--pill);padding:4px 14px;min-height:40px;min-width:48px;color:var(--ink);font-weight:600;cursor:pointer}
+button.amount-currency.locked{background:none;color:var(--muted);pointer-events:none}
+.fx-hint{margin:-6px 0 10px;text-align:center;font-size:13px;color:var(--muted)}
+.fx-sub{display:block;font-size:12px;font-weight:400;color:var(--muted);text-align:right}
+.group-toggle.four{grid-template-columns:repeat(4,1fr)}
+.secondary-button.small{width:auto;min-height:36px;padding:0 14px;font-size:14px;flex-shrink:0}
+.year-send{margin-top:10px}
+.profile-tiles{margin-top:10px}
+.profile-tiles .panel-tile{min-height:96px}
+.month-stepper{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.month-stepper b{font-size:17px;font-weight:600}
+.month-stepper button{width:44px;height:44px;border:1px solid var(--line);border-radius:50%;background:var(--card);color:var(--ink);font-size:22px;line-height:1}
+.month-stepper button:disabled{opacity:.35}
+.shop-add{display:flex;gap:8px}
+.shop-add .note-input{flex:1;margin:0}
+.shop-add .sheet-submit{width:auto;margin:0;padding:0 18px}
+.shop-list{display:flex;flex-direction:column}
+.shop-row{display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--line-soft)}
+.shop-row:last-child{border-bottom:0}
+.shop-check{flex:1;display:flex;align-items:center;gap:12px;min-height:52px;border:0;background:none;color:var(--ink);font:inherit;font-size:16px;text-align:left;padding:0;cursor:pointer}
+.shop-check i{flex-shrink:0;width:24px;height:24px;border:2px solid var(--line);border-radius:7px;display:grid;place-items:center;font-style:normal;font-size:14px;font-weight:700;color:#fff}
+.shop-row.done .shop-check i{background:var(--green);border-color:var(--green)}
+.shop-row.done .shop-check span{color:var(--muted);text-decoration:line-through}
+.shop-actions{display:flex;flex-direction:column;gap:8px}
+.plan-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.plan-summary>div{display:flex;flex-direction:column;gap:2px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-lg);min-width:0}
+.plan-summary span{font-size:12px;color:var(--muted)}
+.plan-summary b{font-size:15px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.plan-list{display:flex;flex-direction:column;gap:14px}
+.plan-row{display:flex;flex-direction:column;gap:6px}
+.plan-row-top{display:flex;justify-content:space-between;gap:10px;font-size:15px}
+.plan-row-top span{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.plan-row small{font-size:13px;color:var(--muted)}
+.plan-bar{height:8px;border-radius:4px;background:var(--strong);overflow:hidden}
+.plan-bar i{display:block;height:100%;border-radius:4px;background:var(--primary)}
+.plan-bar i.warn{background:var(--warn)}
+.plan-bar i.over{background:var(--red)}
+.plan-buttons,.plan-edit{display:flex;flex-direction:column;gap:8px}
+.mcal-week,.mcal{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.mcal-week span{text-align:center;font-size:12px;color:var(--muted)}
+.mcal-day{display:flex;flex-direction:column;align-items:center;gap:2px;min-height:58px;padding:6px 0 4px;border:1px solid var(--line-soft);border-radius:var(--r-md);background:var(--card);color:var(--ink);font:inherit;cursor:pointer}
+.mcal-day b{font-size:15px;font-weight:600}
+.mcal-day small{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;min-height:13px}
+.mcal-day.today{border-color:var(--primary)}
+.mcal-day.today b{color:var(--primary)}
+.mcal-day.selected{background:var(--primary);border-color:var(--primary)}
+.mcal-day.selected b,.mcal-day.selected small{color:#fff}
+.mcal-dots{display:flex;gap:3px;min-height:6px}
+.mcal-dots i,.mcal-legend i{width:6px;height:6px;border-radius:50%;display:inline-block}
+.ev-neg{background:var(--red)}
+.ev-pos{background:var(--green)}
+.ev-goal{background:var(--warn)}
+.ev-done{background:var(--muted-soft)}
+.mcal-day.selected .mcal-dots i{box-shadow:0 0 0 1.5px #fff}
+.mcal-legend{display:flex;gap:14px;font-size:12px;color:var(--muted)}
+.mcal-legend span{display:flex;align-items:center;gap:6px}
+.journal-main small.wrap,.journal-main b.wrap{white-space:normal}
+.journal-time{flex-shrink:0;font-size:12px;color:var(--muted);align-self:flex-start;padding-top:2px}
+.siri-box{display:flex;flex-direction:column;gap:10px;margin-top:10px}
+.siri-steps{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px;font-size:14px;line-height:1.45}
+.siri-url{padding:10px 12px;border:1px dashed var(--line);border-radius:var(--r-md);font-size:13px;word-break:break-all;user-select:all;font-family:ui-monospace,Menlo,monospace}
+.siri-actions{display:flex;align-items:center;gap:10px}
+.sub-row{cursor:default}
+@media (max-width:360px){.mcal-day{min-height:50px}.mcal-day small{font-size:10px}.plan-summary b{font-size:14px}}

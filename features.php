@@ -101,7 +101,16 @@ function validate_entry(array $d): array {
   $group = in_array($groupInput, ['fixed', 'variable'], true) ? $groupInput : category_group_of($category, stored_category_group($category));
   $account = trim((string)($d['account'] ?? ''));
   if (mb_strlen($account) > 80) throw new RuntimeException('Слишком длинное название счёта');
-  return ['kind' => $kind, 'amount' => $amount, 'category' => $category, 'group' => $group, 'note' => $note, 'date' => $date, 'account' => $account];
+  // A foreign-currency amount is stored in tenge at today's National Bank rate, the original is kept
+  $currency = strtoupper((string)($d['currency'] ?? 'KZT'));
+  $orig = null;
+  if ($currency !== 'KZT' && $currency !== '') {
+    if (!isset(FX_CODES[$currency])) throw new RuntimeException('Неизвестная валюта');
+    $orig = $amount;
+    $amount = to_kzt($amount, $currency);
+  } else $currency = null;
+  return ['kind' => $kind, 'amount' => $amount, 'category' => $category, 'group' => $group, 'note' => $note, 'date' => $date, 'account' => $account,
+    'orig_amount' => $orig, 'orig_currency' => $currency];
 }
 
 function stored_category_group(string $category): ?string {
@@ -112,10 +121,13 @@ function stored_category_group(string $category): ?string {
 }
 
 function insert_transaction(int $memberId, array $e, ?int $recurringId = null, ?string $importKey = null): int {
-  $q = db()->prepare('INSERT INTO transactions(telegram_id,kind,amount,category,category_group,note,occurred_on,recurring_id,import_account,import_key) VALUES(?,?,?,?,?,?,?,?,?,?)');
-  $q->execute([$memberId, $e['kind'], $e['amount'], $e['category'], $e['group'], $e['note'], $e['date'], $recurringId, ($e['account'] ?? '') !== '' ? $e['account'] : null, $importKey]);
+  $q = db()->prepare('INSERT INTO transactions(telegram_id,kind,amount,category,category_group,note,occurred_on,recurring_id,import_account,import_key,orig_amount,orig_currency) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)');
+  $q->execute([$memberId, $e['kind'], $e['amount'], $e['category'], $e['group'], $e['note'], $e['date'], $recurringId, ($e['account'] ?? '') !== '' ? $e['account'] : null, $importKey,
+    $e['orig_amount'] ?? null, $e['orig_currency'] ?? null]);
+  $id = (int)db()->lastInsertId();
   mark_balance_changed();
-  return (int)db()->lastInsertId();
+  audit('create', 'transaction', $id, tx_summary($e));
+  return $id;
 }
 
 function get_transaction(int $id): ?array {
@@ -134,17 +146,25 @@ function update_transaction(int $id, array $d): array {
   if (!is_member_id($payer)) throw new RuntimeException('Неверный участник');
   // The account is kept unless the form sends one ('' clears it)
   $account = array_key_exists('account', $d) ? ($e['account'] !== '' ? $e['account'] : null) : $old['import_account'];
-  db()->prepare('UPDATE transactions SET telegram_id=?,kind=?,amount=?,category=?,category_group=?,note=?,occurred_on=?,import_account=? WHERE id=?')
-    ->execute([$payer, $e['kind'], $e['amount'], $e['category'], $e['group'], $e['note'], $e['date'], $account, $id]);
+  db()->prepare('UPDATE transactions SET telegram_id=?,kind=?,amount=?,category=?,category_group=?,note=?,occurred_on=?,import_account=?,orig_amount=?,orig_currency=? WHERE id=?')
+    ->execute([$payer, $e['kind'], $e['amount'], $e['category'], $e['group'], $e['note'], $e['date'], $account, $e['orig_amount'], $e['orig_currency'], $id]);
   mark_balance_changed();
+  $before = tx_summary($old);
+  $after = tx_summary($e);
+  audit('update', 'transaction', $id, $before === $after ? $after : $before . ' → ' . $after);
   return $e + ['id' => $id, 'payer_id' => $payer];
 }
 
 function delete_transaction(int $id): bool {
-  $q = db()->prepare('DELETE FROM transactions WHERE id=?');
-  $q->execute([$id]);
-  if ($q->rowCount() > 0) { mark_balance_changed(); return true; }
-  return false;
+  $old = get_transaction($id);
+  if (!$old) return false;
+  db()->prepare('DELETE FROM transactions WHERE id=?')->execute([$id]);
+  mark_balance_changed();
+  if (empty($GLOBALS['FAMFIN_AUDIT_MUTE'])) {
+    trash_put('transaction', $old, tx_summary($old));
+    audit('delete', 'transaction', $id, tx_summary($old));
+  }
+  return true;
 }
 
 /* ========== CATEGORY GUESSING ========== */
@@ -194,15 +214,27 @@ function add_transfer(int $from, int $to, $amount, string $note, string $date, i
   if (!is_member_id($from) || !is_member_id($to) || $from === $to) throw new RuntimeException('Выберите, кто кому передал');
   if ($a === null || !valid_date($date) || mb_strlen($note) > 500) throw new RuntimeException('Проверьте сумму и дату перевода');
   db()->prepare('INSERT INTO transfers(from_id,to_id,amount,note,occurred_on,created_by) VALUES(?,?,?,?,?,?)')->execute([$from, $to, $a, $note, $date, $createdBy]);
+  $id = (int)db()->lastInsertId();
   mark_balance_changed();
-  return (int)db()->lastInsertId();
+  audit('create', 'transfer', $id, transfer_summary(['from_id' => $from, 'to_id' => $to, 'amount' => $a, 'occurred_on' => $date]));
+  return $id;
+}
+
+function transfer_summary(array $t): string {
+  $n = allowed_members_map();
+  return 'Перевод ' . ($n[(int)$t['from_id']] ?? '?') . ' → ' . ($n[(int)$t['to_id']] ?? '?') . ' ' . fmt_money((float)$t['amount']) . ' · ' . (new DateTimeImmutable($t['occurred_on']))->format('d.m.Y');
 }
 
 function delete_transfer(int $id): bool {
-  $q = db()->prepare('DELETE FROM transfers WHERE id=?');
+  $q = db()->prepare('SELECT * FROM transfers WHERE id=?');
   $q->execute([$id]);
-  if ($q->rowCount() > 0) { mark_balance_changed(); return true; }
-  return false;
+  $old = $q->fetch();
+  if (!$old) return false;
+  db()->prepare('DELETE FROM transfers WHERE id=?')->execute([$id]);
+  mark_balance_changed();
+  trash_put('transfer', $old, transfer_summary($old));
+  audit('delete', 'transfer', $id, transfer_summary($old));
+  return true;
 }
 
 function list_transfers(int $limit = 10): array {
@@ -578,13 +610,16 @@ function import_rows(array $rows, int $payerId): array {
     $pdo->commit();
   } catch (Throwable $e) { $pdo->rollBack(); throw $e; }
   if ($result['ids']) mark_balance_changed();
+  if ($result['ids'] || $result['linked']) audit('import', 'transaction', null, 'Выписка: ' . count($result['ids']) . ' новых, ' . count($result['linked']) . ' связано с ручными');
   return $result;
 }
 
 // "Undo import": removes created operations and unlinks manual ones
 function undo_import(array $ids, array $linked): int {
   $n = 0;
-  foreach ($ids as $id) if (delete_transaction((int)$id)) $n++;
+  audit_mute(true);
+  try { foreach ($ids as $id) if (delete_transaction((int)$id)) $n++; } finally { audit_mute(false); }
+  if ($n) audit('delete', 'transaction', null, "Отмена импорта: удалено $n операций");
   $q = db()->prepare('UPDATE transactions SET import_key=NULL,import_account=NULL WHERE id=?');
   foreach ($linked as $id) $q->execute([(int)$id]);
   return $n;
@@ -902,8 +937,10 @@ function reconcile_account(string $account, int $holderId, string $date, float $
   $note = 'Сверка с банком: ' . $account . ', доступно ' . fmt_money_exact($bankAmount) . ' на ' . (new DateTimeImmutable($date))->format('d.m.Y');
   db()->prepare('INSERT INTO balance_adjustments(telegram_id,account,amount,occurred_on,note,created_by) VALUES(?,?,?,?,?,?)')
     ->execute([$holderId, $account, $diff, $date, $note, $createdBy]);
+  $id = (int)db()->lastInsertId();
   mark_balance_changed();
-  return ['id' => (int)db()->lastInsertId(), 'diff' => $diff, 'before' => $before];
+  audit('create', 'adjustment', $id, 'Сверка ' . $account . ': ' . ($diff > 0 ? '+' : '−') . fmt_money_exact(abs($diff)));
+  return ['id' => $id, 'diff' => $diff, 'before' => $before];
 }
 
 function delete_adjustment(int $id): void {
@@ -1033,7 +1070,10 @@ function deposits_list(): array {
   $out = [];
   foreach (db()->query('SELECT * FROM deposits ORDER BY id') as $r) {
     $id = (int)$r['id'];
-    $out[] = ['id' => $id, 'title' => $r['title'], 'bank' => $r['bank'], 'amount' => round((float)($sums[$id]['s'] ?? 0), 2),
+    $amount = round((float)($sums[$id]['s'] ?? 0), 2);
+    $cur = (string)($r['currency'] ?? 'KZT') ?: 'KZT';
+    try { $kzt = to_kzt($amount, $cur); } catch (RuntimeException $e) { $kzt = $amount; }
+    $out[] = ['id' => $id, 'title' => $r['title'], 'bank' => $r['bank'], 'amount' => $amount, 'currency' => $cur, 'amount_kzt' => round($kzt, 2),
       'rate' => $r['rate'] === null ? null : (float)$r['rate'], 'note' => $r['note'], 'moves' => (int)($sums[$id]['n'] ?? 0), 'last_move' => $sums[$id]['last'] ?? null];
   }
   return $out;
@@ -1065,7 +1105,9 @@ function deposit_save(array $d, array $member): int {
   $pdo = db();
   $pdo->beginTransaction();
   try {
-    $pdo->prepare('INSERT INTO deposits(title,bank,amount,rate,note,created_by) VALUES(?,?,0,?,?,?)')->execute([$title, $bank, $rate, $note, $member['id']]);
+    $cur = strtoupper((string)($d['currency'] ?? 'KZT'));
+    if ($cur !== 'KZT' && !isset(FX_CODES[$cur])) throw new RuntimeException('Неизвестная валюта');
+    $pdo->prepare('INSERT INTO deposits(title,bank,amount,rate,note,created_by,currency) VALUES(?,?,0,?,?,?,?)')->execute([$title, $bank, $rate, $note, $member['id'], $cur]);
     $id = (int)$pdo->lastInsertId();
     if ($open > 0) $pdo->prepare('INSERT INTO deposit_moves(deposit_id,kind,amount,occurred_on,note,created_by) VALUES(?,?,?,?,?,?)')->execute([$id, 'init', round($open, 2), date('Y-m-d'), 'Остаток на начало', $member['id']]);
     $pdo->commit();
@@ -1081,7 +1123,9 @@ function deposit_move(int $id, string $kind, $amount, string $note, string $date
   if (!valid_date($date)) throw new RuntimeException('Неверная дата');
   $balance = 0.0;
   foreach (deposits_list() as $dep) if ($dep['id'] === $id) $balance = $dep['amount'];
-  if ($kind === 'out' && $v > $balance + 0.005) throw new RuntimeException('На депозите только ' . fmt_money($balance));
+  $cur = 'KZT';
+  foreach (deposits_list() as $dep) if ($dep['id'] === $id) $cur = $dep['currency'];
+  if ($kind === 'out' && $v > $balance + 0.005) throw new RuntimeException('На депозите только ' . fmt_cur($balance, $cur));
   db()->prepare('INSERT INTO deposit_moves(deposit_id,kind,amount,occurred_on,note,created_by) VALUES(?,?,?,?,?,?)')
     ->execute([$id, $kind, $kind === 'out' ? -$v : $v, $date, mb_substr(trim($note), 0, 300), $member['id']]);
 }
@@ -1095,7 +1139,7 @@ function deposit_delete(int $id): void {
 
 /* ========== DATA RESET (both members confirm in Telegram) ========== */
 const RESET_TABLES = ['transactions', 'transfers', 'goals', 'goal_moves', 'recurring', 'spend_limits', 'limit_notices', 'balance_adjustments',
-  'debts', 'debt_moves', 'deposits', 'deposit_moves', 'custom_categories', 'statement_jobs'];
+  'debts', 'debt_moves', 'deposits', 'deposit_moves', 'custom_categories', 'statement_jobs', 'plan_items', 'shopping', 'trash'];
 
 function reset_pending(): ?array {
   $r = db()->query("SELECT * FROM reset_requests WHERE status='pending' ORDER BY id DESC LIMIT 1")->fetch();
