@@ -952,3 +952,4 @@ details[open]>summary>.pf-chev{transform:rotate(-135deg);margin:4px 4px 0 0}
 .guide-feedback span{flex:1 1 100%;line-height:1.45}
 .guide-feedback button{min-height:36px;padding:0 14px;border:1px solid var(--line);border-radius:var(--pill);background:var(--card);color:var(--ink);font:inherit;font-size:14px;font-weight:600;cursor:pointer}
 .guide-empty{text-align:center;color:var(--muted);font-size:14px;padding:20px 0}
+.widget-code{width:100%;height:160px;margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--bg);color:var(--ink);font:11px/1.4 ui-monospace,Menlo,monospace;resize:vertical}

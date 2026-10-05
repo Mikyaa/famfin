@@ -2617,28 +2617,59 @@ $('#roundupGoal').onchange = e => savePrefs({roundup_goal: Number(e.target.value
 $$('#roundupStep button').forEach(b => b.onclick = () => savePrefs({roundup_goal: prefs.roundup.goal, roundup_step: Number(b.dataset.step)}));
 $$('#themeToggle button').forEach(b => b.addEventListener('click', () => setTimeout(updateProfileSums, 0)));
 
-// Scriptable widget: reads the personal link with mode=json
+// Scriptable widget: reads the personal link with mode=json. Run inside Scriptable it always
+// shows something: the preview, or the reason it could not load.
+function widgetCode(url){
+  return `// Семейный бюджет — виджет для Scriptable
+const FEED = ${JSON.stringify(url + '&mode=json')};
+const fmt = n => Math.round(n).toLocaleString('ru-RU') + ' ₸';
+let r = null, err = null;
+try {
+  const req = new Request(FEED);
+  req.timeoutInterval = 15;
+  const body = await req.loadString();
+  const code = req.response ? req.response.statusCode : 0;
+  if (code === 403) throw new Error('Ссылка устарела. Скопируйте код виджета заново в профиле бюджета.');
+  if (code !== 200) throw new Error('Сервер ответил ' + code);
+  r = JSON.parse(body);
+} catch (e) { err = String(e && e.message ? e.message : e); }
+const w = new ListWidget();
+w.backgroundColor = new Color('#141B29');
+w.url = ${JSON.stringify(url.replace(/quick\.php.*$/, ''))};
+const t = w.addText('Семейный бюджет'); t.textColor = new Color('#A9B0BE'); t.font = Font.mediumSystemFont(12);
+w.addSpacer(6);
+if (r) {
+  const b = w.addText(fmt(r.balance)); b.textColor = Color.white(); b.font = Font.boldSystemFont(24); b.minimumScaleFactor = 0.6;
+  w.addSpacer(4);
+  const m = w.addText('За ' + r.month + ': ' + fmt(r.spent_month)); m.textColor = new Color('#A9B0BE'); m.font = Font.systemFont(12);
+  if (r.plan_left !== null) { const p = w.addText('По плану: ' + fmt(r.plan_left)); p.textColor = new Color(r.plan_left < 0 ? '#FF6B6B' : '#5BD69A'); p.font = Font.systemFont(12); }
+  w.addSpacer();
+  const u = w.addText('обновлено ' + r.updated); u.textColor = new Color('#6E7584'); u.font = Font.systemFont(10);
+} else {
+  const e = w.addText('Нет данных'); e.textColor = new Color('#FF6B6B'); e.font = Font.boldSystemFont(16);
+  w.addSpacer(4);
+  const d = w.addText(err || ''); d.textColor = new Color('#A9B0BE'); d.font = Font.systemFont(11);
+}
+w.refreshAfterDate = new Date(Date.now() + 30 * 60 * 1000);
+if (config.runsInWidget) {
+  Script.setWidget(w);
+} else {
+  if (err) { const a = new Alert(); a.title = 'Виджет не загрузился'; a.message = err; a.addAction('OK'); await a.presentAlert(); }
+  await w.presentSmall();
+}
+Script.complete();`;
+}
 $('#widgetCopy').onclick = async () => {
   const url = $('#siriUrl').textContent.trim();
   if (!url) return;
-  const code = `// Семейный бюджет — виджет для Scriptable
-const r = await new Request(${JSON.stringify(url + '&mode=json')}).loadJSON();
-const fmt = n => Math.round(n).toLocaleString('ru-RU') + ' ₸';
-const w = new ListWidget();
-w.backgroundColor = new Color('#141B29');
-const t = w.addText('Семейный бюджет'); t.textColor = new Color('#A9B0BE'); t.font = Font.mediumSystemFont(12);
-w.addSpacer(6);
-const b = w.addText(fmt(r.balance)); b.textColor = Color.white(); b.font = Font.boldSystemFont(24); b.minimumScaleFactor = 0.6;
-w.addSpacer(4);
-const m = w.addText('За ' + r.month + ': ' + fmt(r.spent_month)); m.textColor = new Color('#A9B0BE'); m.font = Font.systemFont(12);
-if (r.plan_left !== null) { const p = w.addText('По плану: ' + fmt(r.plan_left)); p.textColor = new Color(r.plan_left < 0 ? '#FF6B6B' : '#5BD69A'); p.font = Font.systemFont(12); }
-w.addSpacer();
-const u = w.addText('обновлено ' + r.updated); u.textColor = new Color('#6E7584'); u.font = Font.systemFont(10);
-w.refreshAfterDate = new Date(Date.now() + 30 * 60 * 1000);
-if (config.runsInWidget) Script.setWidget(w); else await w.presentSmall();
-Script.complete();`;
-  try { await navigator.clipboard.writeText(code); notice('Код виджета скопирован ✓', true); }
-  catch { notice('Не удалось скопировать — откройте профиль на сайте'); }
+  const code = widgetCode(url);
+  const box = $('#widgetCode');
+  try { await navigator.clipboard.writeText(code); box.hidden = true; notice('Код виджета скопирован ✓ Вставьте его в Scriptable', true); return; } catch {}
+  // Telegram may block the clipboard: show the code to copy by hand
+  box.value = code; box.hidden = false; box.focus(); box.select(); box.setSelectionRange(0, code.length);
+  let copied = false;
+  try { copied = document.execCommand('copy'); } catch {}
+  notice(copied ? 'Код виджета скопирован ✓' : 'Код выделен ниже — нажмите «Скопировать» в меню', copied);
 };
 
 /* ========== COMPARISON WITH LAST YEAR ========== */

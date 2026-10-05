@@ -559,6 +559,7 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
                 <li>Не нажимайте «Add to Home Screen» внутри Scriptable — это ярлык, а не виджет.</li>
               </ol>
               <button type="button" class="secondary-button small" id="widgetCopy">Скопировать код виджета</button>
+              <textarea class="widget-code" id="widgetCode" readonly hidden aria-label="Код виджета"></textarea>
             </details>
           </div>
           <p class="pf-note">Голосовые боту тоже работают: «такси две тысячи».</p>
