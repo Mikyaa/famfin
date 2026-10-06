@@ -216,8 +216,8 @@ function categorize_text(string $text): ?string {
 
 /* ========== TRANSFERS ========== */
 // Money handed from one member to the other: personal balances move, the shared one does not
-// Imported from a statement ($account set): money moved between our two cards. It follows the card's
-// balance (out of it, or into it when $incoming) and does not change personal balances (card_only).
+// Imported from a statement ($account set): the card's balance follows it (out of the card, or into it
+// when $incoming). Like any transfer between us it moves money from one personal balance to the other.
 function add_transfer(int $from, int $to, $amount, string $note, string $date, int $createdBy, string $account = '', ?string $key = null, bool $incoming = false): int {
   $a = parse_amount($amount);
   $note = trim($note);
@@ -225,7 +225,7 @@ function add_transfer(int $from, int $to, $amount, string $note, string $date, i
   if ($a === null || !valid_date($date) || mb_strlen($note) > 500) throw new RuntimeException('Проверьте сумму и дату перевода');
   $acc = $account !== '' ? $account : null;
   db()->prepare('INSERT INTO transfers(from_id,to_id,amount,note,occurred_on,created_by,from_account,to_account,import_key,card_only) VALUES(?,?,?,?,?,?,?,?,?,?)')
-    ->execute([$from, $to, $a, $note, $date, $createdBy, $incoming ? null : $acc, $incoming ? $acc : null, $key, $acc !== null ? 1 : 0]);
+    ->execute([$from, $to, $a, $note, $date, $createdBy, $incoming ? null : $acc, $incoming ? $acc : null, $key, 0]);
   $id = (int)db()->lastInsertId();
   mark_balance_changed();
   audit('create', 'transfer', $id, transfer_summary(['from_id' => $from, 'to_id' => $to, 'amount' => $a, 'occurred_on' => $date]));
@@ -547,7 +547,8 @@ function parse_bank_statement(string $text, int $payerId): array {
 //   member  — to the other member ("Томирис Ж."): a transfer inside the family, target = member id
 //   own     — "На карту Halyk Bank*2093", "на свой Kaspi Депозит": our other account, target = its name
 //   people  — to anyone else: spending in «Переводы»
-// Money between the two of us (either direction) goes card to card: personal balances stay as they are.
+// Money between the two of us (either direction) is a transfer between personal balances, not a top-up:
+// what Tomiris sends to Mirzhan's card becomes his money and leaves hers.
 function statement_route(string $kind, string $type, string $details, int $payerId): array {
   $d = mb_strtolower($details);
   if ($kind === 'topup') {
@@ -592,9 +593,10 @@ function existing_import_keys(array $keys): array {
   return $found;
 }
 
-// Manual operations (no source label) of this member that match exactly by date, kind and amount
+// Manual operations and QR receipts of this member that match exactly by date, kind and amount
+// (a receipt keeps its own label, the statement line is just not added again)
 function manual_matches(int $payerId, string $from, string $to): array {
-  $q = db()->prepare('SELECT id,occurred_on,kind,amount FROM transactions WHERE import_key IS NULL AND telegram_id=? AND occurred_on>=? AND occurred_on<=? ORDER BY id');
+  $q = db()->prepare("SELECT id,occurred_on,kind,amount FROM transactions WHERE (import_key IS NULL OR import_key LIKE 'receipt:%') AND telegram_id=? AND occurred_on>=? AND occurred_on<=? ORDER BY id");
   $q->execute([$payerId, $from, $to]);
   $pool = [];
   foreach ($q as $r) $pool[$r['occurred_on'] . '|' . $r['kind'] . '|' . number_format((float)$r['amount'], 2, '.', '')][] = (int)$r['id'];
@@ -727,7 +729,7 @@ function undo_import(array $ids, array $linked, array $moves = [], array $linked
     foreach ($moves as $id) if (delete_transfer((int)$id)) $n++;
   } finally { audit_mute(false); }
   if ($n) audit('delete', 'transaction', null, "Отмена импорта: удалено $n операций");
-  $q = db()->prepare('UPDATE transactions SET import_key=NULL,import_account=NULL WHERE id=?');
+  $q = db()->prepare("UPDATE transactions SET import_key=NULL,import_account=NULL WHERE id=? AND (import_key IS NULL OR import_key NOT LIKE 'receipt:%')");
   foreach ($linked as $id) $q->execute([(int)$id]);
   $q = db()->prepare('UPDATE transfers SET import_key=NULL WHERE id=?');
   foreach ($linkedMoves as $id) $q->execute([(int)$id]);
@@ -874,10 +876,10 @@ function statement_summary(array $rows, int $payerId, string $fileName = '', arr
   if ($in) {
     $lines[] = '💰 Новые пополнения: ' . count($in) . ' на ' . fmt_money(array_sum(array_column($in, 'amount')));
   }
-  $routes = ['member' => '👫 Переводы между нашими картами', 'own' => '🔁 На свои счета', 'cash_in' => '💵 Наличные на карту'];
+  $routes = ['member' => '👫 Переводы между нами', 'own' => '🔁 На свои счета', 'cash_in' => '💵 Наличные на карту'];
   foreach ($routes as $rk => $label) {
     $rr = array_filter($rows, fn($r) => ($r['route'] ?? null) === $rk && !$r['duplicate']);
-    if ($rr) $lines[] = $label . ': ' . count($rr) . ' на ' . fmt_money(array_sum(array_column($rr, 'amount'))) . ' — не трата и не пополнение, личные остатки не меняются';
+    if ($rr) $lines[] = $label . ': ' . count($rr) . ' на ' . fmt_money(array_sum(array_column($rr, 'amount'))) . ' — не трата и не пополнение';
   }
   $loans = array_filter($rows, fn($r) => !$r['duplicate'] && !$r['purchase'] && $r['category'] === 'Кредиты');
   if ($loans) $lines[] = '🏦 Платежи по кредитам: ' . count($loans) . ' на ' . fmt_money(array_sum(array_column($loans, 'amount')));
