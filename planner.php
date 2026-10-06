@@ -367,7 +367,7 @@ function handle_free_text(int $userId, string $text, ?int $chatId = null): strin
     if ($chatId) telegram('sendMessage', ['chat_id' => $chatId, 'text' => withdrawal_text($w, user_label($userId)), 'reply_markup' => bot_keyboard($userId, ['type' => 'move_undo', 'id' => $w['id'], 'opts' => ['undo']], ['↩️ Отменить'])]);
     return withdrawal_text($w, user_label($userId), '✅ Записал снятие наличных');
   }
-  if (paid_in_cash($text)) $e = entry_paid_in_cash($e);
+  if (paid_in_cash($text)) $e = entry_paid_in_cash($e, $userId);
   if ($e['category'] === null) $e['category'] = 'Другое';
   $saved = bot_save_entry($userId, $e);
   if ($chatId) telegram('sendMessage', ['chat_id' => $chatId, 'text' => bot_entry_text($saved['entry'], user_label($userId)) . bot_limit_lines($saved['limits']), 'reply_markup' => bot_tx_markup($userId, $saved['id'])]);

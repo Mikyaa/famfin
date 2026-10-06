@@ -344,8 +344,14 @@ function renderTransferDir(){
 }
 
 // Between accounts: from a card (or "Без счёта") to cash or another card. A cash wallet is offered even before it exists.
-const CASH_NAME = 'Наличные';
-const cashAccountName = () => (accountsCache.find(a => a.kind === 'cash') || {}).name || CASH_NAME;
+// Everyone has their own cash wallet; before it exists the app offers "<Имя> нал" and the server creates it
+const cashAccountName = (memberId = myId()) => {
+  const own = accountsCache.find(a => a.kind === 'cash' && Number(a.owner) === Number(memberId));
+  if (own) return own.name;
+  const m = familyMembers().find(x => Number(x.id) === Number(memberId));
+  return `${(m?.name || 'Мои').split(' ')[0]} нал`;
+};
+const isCashAccount = name => name === cashAccountName() || accountsCache.some(a => a.name === name && a.kind === 'cash');
 function moveDefaults(){
   const cash = cashAccountName();
   let last = '';
@@ -359,7 +365,7 @@ function renderMoveRows(){
   if (!names.includes(cashAccountName())) names.push(cashAccountName());
   const chip = (attr, n, sel, label) => `<button type="button" data-${attr}="${safe(n)}" class="${sel ? 'selected' : ''}">${safe(label || n)}</button>`;
   $('#moveFrom').innerHTML = [chip('from', '', !sheetState.moveFrom, 'Без счёта'), ...names.map(n => chip('from', n, sheetState.moveFrom === n))].join('');
-  $('#moveTo').innerHTML = names.map(n => chip('to', n, sheetState.moveTo === n, n === cashAccountName() ? '💵 ' + n : n)).join('');
+  $('#moveTo').innerHTML = names.map(n => chip('to', n, sheetState.moveTo === n, isCashAccount(n) ? '💵 ' + n : n)).join('');
   $$('#moveFrom button').forEach(b => b.onclick = () => {
     sheetState.moveFrom = b.dataset.from;
     if (sheetState.moveTo === sheetState.moveFrom) sheetState.moveTo = '';
@@ -537,7 +543,7 @@ function bindSheet(){
   $('#submitBtn').onclick = submitEntry;
   $('#sheetToMove').onclick = async () => {
     if (!sheetState.editId) return;
-    if (!(await showConfirm(`Записать как снятие наличных? Трата исчезнет из расходов, а сумма перейдёт со счёта в «${cashAccountName()}».`))) return;
+    if (!(await showConfirm(`Записать как снятие наличных? Трата исчезнет из расходов, а сумма перейдёт со счёта в «${cashAccountName(sheetState.payerId)}».`))) return;
     try {
       await request('api.php?action=tx_to_move', {method:'POST', body: JSON.stringify({id: sheetState.editId})});
       haptic('success');
@@ -704,7 +710,7 @@ async function deleteRecord(id, el, type = 'tx'){
 /* ========== OPERATION LISTS ========== */
 function txRowHtml(t){
   if (t.type === 'transfer' && t.move) {
-    const atm = t.to_account === cashAccountName();
+    const atm = isCashAccount(t.to_account);
     return `<article class="transaction transfer" data-type="transfer" data-id="${t.id}">
       <i class="tx-icon transfer">${atm ? '🏧' : '⇄'}</i>
       <div class="tx-main">
@@ -1799,7 +1805,7 @@ function renderImportRows(){
       <span class="import-main">
         <span class="import-top"><b>${safe(r.note || r.type)}</b><b class="tx-amount ${r.kind}">${r.kind === 'expense' ? '−' : '+'}${money(r.amount)}</b></span>
         <span class="import-meta">${fmtDate(r.date)} · ${safe(r.type)}${r.dup === 'imported' ? ' · <em>уже импортирована раньше</em>' : r.dup === 'manual' ? ' · <em>уже записана вручную</em>' : ''}</span>
-        ${r.cash ? `<span class="import-meta">🏧 Перевод в «${safe(cashAccountName())}» — не трата</span>` : `<select data-cat="${i}" aria-label="Категория">${cats.map(x => `<option ${x === r.category ? 'selected' : ''}>${safe(x)}</option>`).join('')}</select>`}
+        ${r.cash ? `<span class="import-meta">🏧 Перевод в «${safe(cashAccountName(importPayer))}» — не трата</span>` : `<select data-cat="${i}" aria-label="Категория">${cats.map(x => `<option ${x === r.category ? 'selected' : ''}>${safe(x)}</option>`).join('')}</select>`}
       </span>
     </label>`;
   }).join('');
@@ -1810,7 +1816,7 @@ function renderImportRows(){
 function syncImportSummary(){
   const sel = importRows.filter(r => r.include);
   const sum = sel.reduce((s, r) => s + (r.kind === 'expense' && !r.cash ? r.amount : 0), 0);
-  $('#importSummary').innerHTML = `Найдено ${importRows.length} операций. Выбрано <b>${sel.length}</b>${sum ? `, расходов на <b>${money(sum)} ${cur(currency)}</b>` : ''}. Снятия наличных запишутся переводом с карты в «${safe(cashAccountName())}», не тратой. Переводы и уже записанные операции не отмечены — проверьте их сами.`;
+  $('#importSummary').innerHTML = `Найдено ${importRows.length} операций. Выбрано <b>${sel.length}</b>${sum ? `, расходов на <b>${money(sum)} ${cur(currency)}</b>` : ''}. Снятия наличных запишутся переводом с карты в «${safe(cashAccountName(importPayer))}», не тратой. Переводы и уже записанные операции не отмечены — проверьте их сами.`;
   $('#importConfirm').disabled = !sel.length;
   $('#importConfirm').textContent = sel.length ? `Импортировать ${sel.length}` : 'Ничего не выбрано';
 }
@@ -2093,7 +2099,13 @@ function renderCapital(d){
 }
 
 /* ========== ACCOUNTS ========== */
-let accountsCache = [], accountOpen = null, accountEditing = null, accountKind = 'card';
+let accountsCache = [], accountOpen = null, accountEditing = null, accountKind = 'card', accountOwner = null;
+function renderAccountOwner(){
+  $('#accountOwnerField').hidden = accountKind !== 'cash';
+  const opts = [[null, 'Общий'], ...familyMembers().map(m => [m.id, m.name])];
+  $('#accountOwner').innerHTML = opts.map(([id, n]) => `<button type="button" data-owner="${id ?? ''}" class="${Number(id || 0) === Number(accountOwner || 0) ? 'selected' : ''}">${safe(n)}</button>`).join('');
+  $$('#accountOwner button').forEach(b => b.onclick = () => { accountOwner = Number(b.dataset.owner) || null; renderAccountOwner(); });
+}
 const ACCOUNT_KIND = {card: 'Карта', cash: 'Наличные', other: 'Другое'};
 function renderAccounts(list){
   accountsCache = list || [];
@@ -2109,7 +2121,7 @@ function renderAccountsSheet(){
   $('#accountsTotal').innerHTML = `<span>На всех счетах</span><b>${total < 0 ? '−' : ''}${money(Math.abs(total))} ${c}</b>`;
   $('#accountsList').innerHTML = accountsCache.length ? accountsCache.map(a => `
     <button type="button" class="debt-row" data-account="${safe(a.name)}">
-      <span class="debt-row-main"><b>${safe(a.name)}</b><small>${ACCOUNT_KIND[a.kind] || 'Счёт'} · ${a.count} ${plural(a.count, 'операция', 'операции', 'операций')}</small></span>
+      <span class="debt-row-main"><b>${safe(a.name)}</b><small>${ACCOUNT_KIND[a.kind] || 'Счёт'}${a.owner ? ' · ' + safe(familyMembers().find(m => Number(m.id) === Number(a.owner))?.name || '') : ''} · ${a.count} ${plural(a.count, 'операция', 'операции', 'операций')}</small></span>
       <b class="${a.balance < 0 ? 'money-neg' : ''}">${a.balance < 0 ? '−' : ''}${money(Math.abs(a.balance))} ${c}</b>
     </button>`).join('') : '<div class="empty">Счетов пока нет</div>';
   $$('#accountsList [data-account]').forEach(b => b.onclick = () => openAccount(accountsCache.find(a => a.name === b.dataset.account)));
@@ -2143,7 +2155,8 @@ $('#accountReconcile').onclick = async () => {
   } catch(e) { haptic('error'); notice(e.message); }
 };
 function openAccountModal(a = null){
-  accountEditing = a; accountKind = a ? a.kind : 'card';
+  accountEditing = a; accountKind = a ? a.kind : 'card'; accountOwner = a ? (a.owner || null) : myId();
+  renderAccountOwner();
   $('#accountModalTitle').textContent = a ? 'Счёт' : 'Новый счёт';
   $('#accountName').value = a ? a.name : '';
   $$('#accountKind button').forEach(b => b.classList.toggle('selected', b.dataset.kind === accountKind));
@@ -2152,10 +2165,10 @@ function openAccountModal(a = null){
   if (!a) setTimeout(() => $('#accountName').focus(), 100);
 }
 const closeAccountModal = () => { $('#accountModal').hidden = true; };
-$$('#accountKind button').forEach(b => b.onclick = () => { accountKind = b.dataset.kind; $$('#accountKind button').forEach(x => x.classList.toggle('selected', x === b)); });
+$$('#accountKind button').forEach(b => b.onclick = () => { accountKind = b.dataset.kind; $$('#accountKind button').forEach(x => x.classList.toggle('selected', x === b)); renderAccountOwner(); });
 $('#accountSave').onclick = async () => {
   try {
-    const d = await request('api.php?action=account_save', {method: 'POST', body: JSON.stringify({old_name: accountEditing?.name || '', name: $('#accountName').value, kind: accountKind})});
+    const d = await request('api.php?action=account_save', {method: 'POST', body: JSON.stringify({old_name: accountEditing?.name || '', name: $('#accountName').value, kind: accountKind, owner: accountKind === 'cash' ? accountOwner : null})});
     haptic('success'); notice('Счёт сохранён ✓', true); closeAccountModal();
     if (accountEditing && !$('#accountSheet').hidden) closeAccount();
     renderAccounts(d.accounts);

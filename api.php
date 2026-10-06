@@ -139,7 +139,8 @@ try {
   if ($method === 'POST' && $action === 'account_save') {
     $d = body();
     $old = trim((string)($d['old_name'] ?? ''));
-    if ($old !== '') account_rename($old, (string)($d['name'] ?? ''), (string)($d['kind'] ?? 'card')); else account_add((string)($d['name'] ?? ''), (string)($d['kind'] ?? 'card'));
+    $owner = (int)($d['owner'] ?? 0) ?: null;
+    if ($old !== '') account_rename($old, (string)($d['name'] ?? ''), (string)($d['kind'] ?? 'card'), $owner); else account_add((string)($d['name'] ?? ''), (string)($d['kind'] ?? 'card'), $owner);
     json_out(['ok' => true, 'accounts' => accounts_list()]);
   }
   if ($method === 'POST' && $action === 'account_delete') { account_delete((string)(body()['name'] ?? '')); json_out(['ok' => true, 'accounts' => accounts_list()]); }

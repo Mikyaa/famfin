@@ -776,6 +776,10 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
         <button type="button" data-kind="cash">Наличные</button>
         <button type="button" data-kind="other">Другое</button>
       </div>
+      <div id="accountOwnerField" hidden>
+        <div class="field-label">Чей кошелёк</div>
+        <div class="group-toggle three" id="accountOwner"></div>
+      </div>
       <button id="accountSave" class="sheet-submit" type="button">Сохранить</button>
       <button id="accountDelete" class="sheet-delete" type="button" hidden>Убрать счёт (операции останутся)</button>
     </div>

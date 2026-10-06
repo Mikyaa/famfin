@@ -27,8 +27,8 @@ function extras_schema(PDO $pdo): void {
 /* ========== ACCOUNTS ========== */
 // An account is a name ("Kaspi Gold *5052", "Наличные"); operations carry it in import_account.
 function accounts_list(): array {
-  $names = [];
-  foreach (db()->query('SELECT name,kind FROM accounts') as $r) $names[(string)$r['name']] = $r['kind'];
+  $names = []; $owners = [];
+  foreach (db()->query('SELECT name,kind,owner FROM accounts') as $r) { $names[(string)$r['name']] = $r['kind']; $owners[(string)$r['name']] = $r['owner'] ? (int)$r['owner'] : null; }
   foreach (db()->query("SELECT DISTINCT import_account FROM transactions WHERE import_account IS NOT NULL AND import_account<>''") as $r) $names[(string)$r['import_account']] ??= 'card';
   foreach (db()->query("SELECT DISTINCT account FROM balance_adjustments WHERE account<>''") as $r) $names[(string)$r['account']] ??= 'card';
   $counts = [];
@@ -39,20 +39,22 @@ function accounts_list(): array {
   }
   $today = date('Y-m-d');
   $out = [];
-  foreach ($names as $name => $kind) $out[] = ['name' => (string)$name, 'kind' => $kind, 'balance' => round(account_net((string)$name, $today), 2), 'count' => $counts[$name] ?? 0];
+  foreach ($names as $name => $kind) $out[] = ['name' => (string)$name, 'kind' => $kind, 'owner' => $owners[$name] ?? null, 'balance' => round(account_net((string)$name, $today), 2), 'count' => $counts[$name] ?? 0];
   usort($out, fn($a, $b) => [$a['kind'] === 'cash', $a['name']] <=> [$b['kind'] === 'cash', $b['name']]);
   return $out;
 }
 
-function account_add(string $name, string $kind): void {
+// $owner: whose cash wallet it is (null — shared); only cash accounts have an owner
+function account_add(string $name, string $kind, ?int $owner = null): void {
   $name = trim(preg_replace('/\s+/u', ' ', $name));
   if ($name === '' || mb_strlen($name) > 80) throw new RuntimeException('Назовите счёт');
   $kind = in_array($kind, ['card', 'cash', 'other'], true) ? $kind : 'card';
-  $sql = is_sqlite() ? 'INSERT INTO accounts(name,kind) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET kind=excluded.kind' : 'INSERT INTO accounts(name,kind) VALUES(?,?) ON DUPLICATE KEY UPDATE kind=VALUES(kind)';
-  db()->prepare($sql)->execute([$name, $kind]);
+  $owner = $kind === 'cash' && $owner && is_member_id($owner) ? $owner : null;
+  $sql = is_sqlite() ? 'INSERT INTO accounts(name,kind,owner) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET kind=excluded.kind,owner=excluded.owner' : 'INSERT INTO accounts(name,kind,owner) VALUES(?,?,?) ON DUPLICATE KEY UPDATE kind=VALUES(kind),owner=VALUES(owner)';
+  db()->prepare($sql)->execute([$name, $kind, $owner]);
 }
 
-function account_rename(string $old, string $new, string $kind): void {
+function account_rename(string $old, string $new, string $kind, ?int $owner = null): void {
   $new = trim(preg_replace('/\s+/u', ' ', $new));
   if ($new === '' || mb_strlen($new) > 80) throw new RuntimeException('Назовите счёт');
   $pdo = db();
@@ -65,7 +67,7 @@ function account_rename(string $old, string $new, string $kind): void {
     $pdo->prepare('DELETE FROM accounts WHERE name=?')->execute([$old]);
     $pdo->commit();
   } catch (Throwable $e) { $pdo->rollBack(); throw $e; }
-  account_add($new, $kind);
+  account_add($new, $kind, $owner);
   mark_balance_changed();
 }
 
@@ -97,7 +99,6 @@ function account_operations(string $name, int $limit = 60): array {
 // Cash taken from an ATM, money moved card to card: not spending and not income.
 // Stored as a transfer of a member to themselves, so personal and shared balances stay as they are;
 // only the two accounts change.
-const CASH_ACCOUNT = 'Наличные';
 
 function account_exists(string $name): bool {
   $q = db()->prepare('SELECT COUNT(*) FROM accounts WHERE name=?');
@@ -105,12 +106,30 @@ function account_exists(string $name): bool {
   return (int)$q->fetchColumn() > 0;
 }
 
-// The cash wallet: the first account of kind "cash", created on first use
-function cash_account(): string {
-  $n = db()->query("SELECT name FROM accounts WHERE kind='cash' ORDER BY name LIMIT 1")->fetchColumn();
-  if ($n !== false) return (string)$n;
-  account_add(CASH_ACCOUNT, 'cash');
-  return CASH_ACCOUNT;
+// Each member has their own cash wallet. An unowned one named after the member ("Томи нал")
+// is claimed on first use; otherwise "<Имя> нал" is created.
+function cash_account(int $memberId): string {
+  $q = db()->prepare("SELECT name FROM accounts WHERE kind='cash' AND owner=? ORDER BY name LIMIT 1");
+  $q->execute([$memberId]);
+  if (($n = $q->fetchColumn()) !== false) return (string)$n;
+  global $config;
+  $first = fn($s) => mb_strtolower(trim(explode(' ', trim((string)$s))[0]));
+  $names = array_filter(array_map($first, array_merge([user_label($memberId)], (array)($config['member_aliases'][$memberId] ?? []))), fn($s) => mb_strlen($s) >= 3);
+  foreach (db()->query("SELECT name FROM accounts WHERE kind='cash' AND owner IS NULL ORDER BY name") as $r) {
+    foreach (preg_split('/[^\p{L}]+/u', mb_strtolower((string)$r['name']), -1, PREG_SPLIT_NO_EMPTY) as $word) {
+      foreach ($names as $n) if (mb_strlen($word) >= 3 && str_starts_with($n, $word)) {
+        db()->prepare('UPDATE accounts SET owner=? WHERE name=?')->execute([$memberId, $r['name']]);
+        return (string)$r['name'];
+      }
+    }
+  }
+  $name = cash_name_for($memberId);
+  account_add($name, 'cash', $memberId);
+  return $name;
+}
+
+function cash_name_for(int $memberId): string {
+  return trim(explode(' ', user_label($memberId))[0]) . ' нал';
 }
 
 // The card a member usually pays from: the account most of their operations carry
@@ -127,7 +146,12 @@ function add_account_move(int $memberId, string $from, string $to, $amount, stri
   if (!is_member_id($memberId)) throw new RuntimeException('Неверный участник');
   if ($from === $to) throw new RuntimeException('Выберите два разных счёта');
   if ($a === null || !valid_date($date) || mb_strlen($note) > 500) throw new RuntimeException('Проверьте сумму и дату перевода');
-  foreach ([$from, $to] as $n) if ($n !== '' && !account_exists($n)) account_add($n, $n === CASH_ACCOUNT ? 'cash' : 'card');
+  // The wallet the app offers before it exists is created as this member's cash
+  foreach ([&$from, &$to] as &$n) if ($n !== '' && !account_exists($n)) {
+    if ($n === cash_name_for($memberId)) $n = cash_account($memberId); else account_add($n, 'card');
+  }
+  unset($n);
+  if ($from === $to) throw new RuntimeException('Выберите два разных счёта');
   db()->prepare('INSERT INTO transfers(from_id,to_id,amount,note,occurred_on,created_by,from_account,to_account,import_key) VALUES(?,?,?,?,?,?,?,?,?)')
     ->execute([$memberId, $memberId, $a, $note, $date, $createdBy, $from ?: null, $to ?: null, $key]);
   $id = (int)db()->lastInsertId();
@@ -141,7 +165,7 @@ function transaction_to_move(int $txId, int $actorId): int {
   $tx = get_transaction($txId);
   if (!$tx || $tx['kind'] !== 'expense') throw new RuntimeException('Перевести в снятие можно только расход');
   if (!empty($tx['orig_currency'])) throw new RuntimeException('Операция в валюте — снятие записывается в тенге');
-  $cash = cash_account();
+  $cash = cash_account((int)$tx['telegram_id']);
   $from = (string)($tx['import_account'] ?? '');
   if ($from === $cash) throw new RuntimeException('Эта трата уже с наличных');
   $pdo = db();
@@ -167,12 +191,12 @@ function paid_in_cash(string $text): bool {
 }
 
 // The entry (from parse_entry_text) without the "наличными" word, with the cash account set
-function entry_paid_in_cash(array $e): array {
+function entry_paid_in_cash(array $e, int $userId): array {
   $e['note'] = trim(preg_replace('/(^|\s)(наличн\p{L}*|наличк\p{L}*|нал|кэш\p{L}*|кеш\p{L}*)(?=\s|$)/iu', ' ', (string)$e['note']));
   $e['note'] = trim(preg_replace('/\s{2,}/u', ' ', $e['note']));
   if ($e['category'] === null && $e['note'] !== '') $e['category'] = categorize_text($e['note']);
   if ($e['category'] !== null && $e['note'] !== '' && mb_stripos($e['category'], $e['note']) === 0) $e['note'] = '';
-  $e['account'] = cash_account();
+  $e['account'] = cash_account($userId);
   return $e;
 }
 
@@ -182,7 +206,7 @@ function save_withdrawal(int $userId, array $e): array {
   $amount = to_kzt((float)$e['amount'], $currency);
   $note = $currency !== 'KZT' ? fmt_cur((float)$e['amount'], $currency) . ' по курсу НБ РК' : '';
   $from = main_card_of($userId);
-  $to = cash_account();
+  $to = cash_account($userId);
   $id = add_account_move($userId, $from, $to, $amount, $note, $e['date'], $userId);
   $e['amount'] = $amount;
   return ['id' => $id, 'from' => $from, 'to' => $to, 'amount' => (float)$e['amount'], 'date' => $e['date']];

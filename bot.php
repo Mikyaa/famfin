@@ -135,7 +135,7 @@ function bot_handle_text(int $chatId, int $userId, string $text): bool {
     telegram('sendMessage', ['chat_id' => $chatId, 'text' => withdrawal_text($w, $who), 'reply_markup' => bot_keyboard($userId, ['type' => 'move_undo', 'id' => $w['id'], 'opts' => ['undo']], ['↩️ Отменить'])]);
     return true;
   }
-  if (paid_in_cash($text)) $e = entry_paid_in_cash($e);
+  if (paid_in_cash($text)) $e = entry_paid_in_cash($e, $userId);
   if ($e['category'] === null) {
     $labels = bot_category_labels('expense');
     $markup = bot_keyboard($userId, ['type' => 'draft', 'entry' => $e, 'opts' => array_merge($labels, ['__cancel'])], array_merge($labels, ['✖️ Не записывать']));
@@ -251,7 +251,7 @@ function bot_import_report(array $res, array $entries, int $payer): string {
   if ($res['moves']) {
     $q = db()->prepare('SELECT COALESCE(SUM(amount),0) FROM transfers WHERE id IN (' . implode(',', array_map('intval', $res['moves'])) . ')');
     $q->execute();
-    $lines[] = '🏧 Снятия наличных: ' . count($res['moves']) . ' на ' . fmt_money((float)$q->fetchColumn()) . ' — переведены в «' . cash_account() . '», тратой не считаются';
+    $lines[] = '🏧 Снятия наличных: ' . count($res['moves']) . ' на ' . fmt_money((float)$q->fetchColumn()) . ' — переведены в «' . cash_account($payer) . '», тратой не считаются';
   }
   if ($res['linked']) $lines[] = '✋ Совпали с записанными вручную: ' . count($res['linked']) . ' — не задвоены, отмечены как из выписки';
   if ($res['skipped']) $lines[] = '♻️ Уже были импортированы раньше: ' . $res['skipped'] . ' — пропущены';

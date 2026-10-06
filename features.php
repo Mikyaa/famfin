@@ -621,7 +621,6 @@ function import_rows(array $rows, int $payerId): array {
   }
   $result = ['ids' => [], 'linked' => [], 'skipped' => 0, 'moves' => [], 'linked_moves' => []];
   if (!$entries) return $result;
-  $cashAccount = array_filter($entries, fn($e) => $e['cash']) ? cash_account() : '';
   $pdo = db();
   $pdo->beginTransaction();
   try {
@@ -643,7 +642,7 @@ function import_rows(array $rows, int $payerId): array {
           $result['linked_moves'][] = $id;
         } else {
           audit_mute(true);
-          try { $result['moves'][] = add_account_move($e['owner'], $e['account'], $cashAccount, $e['amount'], $e['note'] ?: 'Снятие наличных', $e['date'], actor() ?: $payerId, $e['key']); }
+          try { $result['moves'][] = add_account_move($e['owner'], $e['account'], cash_account($e['owner']), $e['amount'], $e['note'] ?: 'Снятие наличных', $e['date'], actor() ?: $payerId, $e['key']); }
           finally { audit_mute(false); }
         }
         $known[$e['key']] = true;
@@ -827,7 +826,7 @@ function statement_summary(array $rows, int $payerId, string $fileName = '', arr
     foreach ($byOwner as $id => $v) $lines[] = '   · от ' . user_label($id) . ' — ' . fmt_money($v) . ' (запишу как её/его пополнение)';
   }
   $atm = array_filter($rows, fn($r) => !empty($r['cash']) && !$r['duplicate']);
-  if ($atm) $lines[] = '🏧 Снятия наличных: ' . count($atm) . ' на ' . fmt_money(array_sum(array_column($atm, 'amount'))) . ' — запишу переводом с карты в «Наличные», не тратой';
+  if ($atm) $lines[] = '🏧 Снятия наличных: ' . count($atm) . ' на ' . fmt_money(array_sum(array_column($atm, 'amount'))) . ' — запишу переводом с карты в «' . cash_account($payerId) . '», не тратой';
   $out = array_filter($rows, fn($r) => empty($r['main']) && empty($r['purchase']) && !$r['duplicate']);
   if ($out) $lines[] = '↔️ Переводы, снятия, комиссии: ' . count($out) . ' — по умолчанию не импортирую';
   if (!empty($meta['available'])) {
