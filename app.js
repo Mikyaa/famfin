@@ -726,7 +726,7 @@ function txRowHtml(t){
       <i class="tx-icon transfer">⇄</i>
       <div class="tx-main">
         <div class="tx-title">${safe(t.from_name)} → ${safe(t.to_name)}</div>
-        <div class="tx-meta">Перевод внутри семьи${t.note ? ' · ' + safe(t.note) : ''}</div>
+        <div class="tx-meta">${t.card_only ? 'Между нашими картами' : 'Перевод внутри семьи'}${t.note ? ' · ' + safe(t.note) : ''}</div>
       </div>
       <b class="tx-amount transfer">${money(t.amount)}</b>
       <button class="tx-delete" aria-label="Удалить перевод" data-delete="${t.id}">×</button>

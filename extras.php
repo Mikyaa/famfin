@@ -87,7 +87,7 @@ function account_operations(string $name, int $limit = 60): array {
   $rows = $q->fetchAll();
   foreach ($rows as &$r) $r['group'] = category_group_of($r['category'], $r['cg'] ?: null);
   unset($r);
-  $q = db()->prepare('SELECT id,from_id,to_id,amount,note,occurred_on,from_account,to_account FROM transfers WHERE from_account=? OR to_account=? ORDER BY occurred_on DESC,id DESC LIMIT ' . max(1, min(500, $limit)));
+  $q = db()->prepare('SELECT id,from_id,to_id,amount,note,occurred_on,from_account,to_account,card_only FROM transfers WHERE from_account=? OR to_account=? ORDER BY occurred_on DESC,id DESC LIMIT ' . max(1, min(500, $limit)));
   $q->execute([$name, $name]);
   $names = allowed_members_map();
   foreach ($q as $t) $rows[] = transfer_row($t, $names);

@@ -20,6 +20,7 @@ function family_schema(PDO $pdo): void {
     ['transfers', 'to_account', 'VARCHAR(80) NULL'],
     ['transfers', 'import_key', 'VARCHAR(40) NULL'],
     ['accounts', 'owner', 'BIGINT NULL'],
+    ['transfers', 'card_only', 'INTEGER NOT NULL DEFAULT 0'],
     ['goals', 'monthly', 'DECIMAL(14,2) NULL'],
     ['goal_moves', 'source_tx', 'BIGINT NULL'],
   ];

@@ -337,8 +337,14 @@ function bot_handle_callback(array $cb): void {
         if (str_starts_with($opt, 'payer:')) {
           $payer = (int)substr($opt, 6);
           if (!is_member_id($payer)) { $answer(); return; }
-          // Member attribution is relative to the card holder: recompute it for the new holder
-          foreach ($p['rows'] as &$row) { if (!empty($row['incoming'])) $row['payer_id'] = member_in_text((string)$row['note'], $payer); }
+          // Transfers between us are relative to the card holder: recompute them for the new holder
+          foreach ($p['rows'] as &$row) {
+            if (empty($row['incoming']) && ($row['route'] ?? null) !== 'member') continue;
+            $m = member_in_text((string)$row['note'], $payer);
+            $in = $row['kind'] === 'topup';
+            if ($m !== null) $row = ['route' => 'member', 'target' => $m, 'incoming' => false, 'payer_id' => null, 'category' => ($in ? 'Перевод от ' : 'Перевод ') . user_label($m)] + $row;
+            else $row = ['route' => null, 'target' => null, 'incoming' => $in, 'payer_id' => null, 'category' => $in ? 'Пополнение' : 'Переводы'] + $row;
+          }
           unset($row);
           $rows = mark_statement_duplicates($p['rows'], $payer);
           $edit(statement_summary($rows, $payer, '', $p['meta'] ?? []), statement_markup($userId, (int)$p['job'], $rows, $payer, $p['meta'] ?? []));
