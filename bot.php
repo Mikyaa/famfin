@@ -130,6 +130,12 @@ function bot_handle_text(int $chatId, int $userId, string $text): bool {
   $e = parse_entry_text($text);
   if (!$e) return false;
   $who = user_label($userId);
+  if (is_withdrawal_text($text)) {
+    $w = save_withdrawal($userId, $e);
+    telegram('sendMessage', ['chat_id' => $chatId, 'text' => withdrawal_text($w, $who), 'reply_markup' => bot_keyboard($userId, ['type' => 'move_undo', 'id' => $w['id'], 'opts' => ['undo']], ['↩️ Отменить'])]);
+    return true;
+  }
+  if (paid_in_cash($text)) $e = entry_paid_in_cash($e);
   if ($e['category'] === null) {
     $labels = bot_category_labels('expense');
     $markup = bot_keyboard($userId, ['type' => 'draft', 'entry' => $e, 'opts' => array_merge($labels, ['__cancel'])], array_merge($labels, ['✖️ Не записывать']));
@@ -220,7 +226,7 @@ function bot_statement_entries(array $rows, bool $all, string $from = '0000-00-0
   foreach (statement_keys($rows) as $r) {
     if ((!$all && empty($r['main']) && !$r['purchase']) || $r['date'] < $from) continue;
     $out[] = ['kind' => $r['kind'], 'amount' => $r['amount'], 'category' => $r['category'], 'note' => $r['note'], 'date' => $r['date'], 'key' => $r['key'],
-      'payer_id' => $r['payer_id'] ?? null, 'account' => $r['account'] ?? ''];
+      'payer_id' => $r['payer_id'] ?? null, 'account' => $r['account'] ?? '', 'cash' => !empty($r['cash'])];
   }
   return $out;
 }
@@ -241,6 +247,11 @@ function bot_import_report(array $res, array $entries, int $payer): string {
     $q = db()->prepare("SELECT telegram_id,SUM(amount) s FROM transactions WHERE kind='topup' AND id IN (" . implode(',', array_map('intval', $res['ids'])) . ") GROUP BY telegram_id");
     $q->execute();
     foreach ($q as $t) if ((int)$t['telegram_id'] !== $payer) $lines[] = '   из них пополнения ' . user_label((int)$t['telegram_id']) . ': ' . fmt_money((float)$t['s']);
+  }
+  if ($res['moves']) {
+    $q = db()->prepare('SELECT COALESCE(SUM(amount),0) FROM transfers WHERE id IN (' . implode(',', array_map('intval', $res['moves'])) . ')');
+    $q->execute();
+    $lines[] = '🏧 Снятия наличных: ' . count($res['moves']) . ' на ' . fmt_money((float)$q->fetchColumn()) . ' — переведены в «' . cash_account() . '», тратой не считаются';
   }
   if ($res['linked']) $lines[] = '✋ Совпали с записанными вручную: ' . count($res['linked']) . ' — не задвоены, отмечены как из выписки';
   if ($res['skipped']) $lines[] = '♻️ Уже были импортированы раньше: ' . $res['skipped'] . ' — пропущены';
@@ -342,14 +353,14 @@ function bot_handle_callback(array $cb): void {
         if (!$entries) { $answer('Нечего импортировать'); return; }
         $res = import_rows($entries, (int)$p['payer']);
         // Nothing new: keep the message (and any earlier "undo" button) as it is
-        if (!$res['ids'] && !$res['linked']) { $answer('Всё из этой выписки уже в бюджете'); return; }
+        if (!$res['ids'] && !$res['linked'] && !$res['moves'] && !$res['linked_moves']) { $answer('Всё из этой выписки уже в бюджете'); return; }
         db()->prepare("UPDATE statement_jobs SET status='imported' WHERE id=?")->execute([(int)$p['job']]);
         $labels = ['↩️ Отменить импорт']; $opts = ['undo'];
         $meta = $p['meta'] ?? [];
         if (!empty($meta['available']) && !empty($meta['account'])) { array_unshift($labels, '⚖️ Сверить остаток с банком'); array_unshift($opts, 'reconcile'); }
-        $undo = bot_keyboard($userId, ['type' => 'statement_undo', 'ids' => $res['ids'], 'linked' => $res['linked'], 'job' => (int)$p['job'], 'payer' => (int)$p['payer'], 'meta' => $meta, 'opts' => $opts], $labels, 1);
+        $undo = bot_keyboard($userId, ['type' => 'statement_undo', 'ids' => $res['ids'], 'linked' => $res['linked'], 'moves' => $res['moves'], 'linked_moves' => $res['linked_moves'], 'job' => (int)$p['job'], 'payer' => (int)$p['payer'], 'meta' => $meta, 'opts' => $opts], $labels, 1);
         $edit(bot_import_report($res, $entries, (int)$p['payer']), $undo);
-        $answer($res['ids'] ? 'Готово' : 'Новых операций нет');
+        $answer($res['ids'] || $res['moves'] ? 'Готово' : 'Новых операций нет');
         return;
       case 'dep_int':
         $key = "dep_int_done:{$p['id']}:{$p['period']}";
@@ -383,6 +394,10 @@ function bot_handle_callback(array $cb): void {
         $edit(($opt === 'approve' ? '✅ ' : '✖️ ') . $msg);
         $answer(mb_substr($msg, 0, 190));
         return;
+      case 'move_undo':
+        $edit(delete_transfer((int)$p['id']) ? '↩️ Снятие наличных отменено' : 'Запись уже удалена');
+        $answer('Отменено');
+        return;
       case 'adjust_undo':
         delete_adjustment((int)$p['id']);
         $edit('↩️ Сверка отменена — корректировка остатка удалена');
@@ -397,7 +412,7 @@ function bot_handle_callback(array $cb): void {
           $answer($r['id'] ? 'Остаток сверен' : 'Уже совпадает');
           return;
         }
-        $n = undo_import($p['ids'] ?? [], $p['linked'] ?? []);
+        $n = undo_import($p['ids'] ?? [], $p['linked'] ?? [], $p['moves'] ?? [], $p['linked_moves'] ?? []);
         db()->prepare("UPDATE statement_jobs SET status='undone' WHERE id=?")->execute([(int)$p['job']]);
         $edit("↩️ Импорт отменён: удалено операций — $n" . (!empty($p['linked']) ? ', с ручных записей снята отметка источника — ' . count($p['linked']) : ''));
         $answer('Отменено');

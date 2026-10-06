@@ -338,9 +338,22 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       </div>
 
       <div class="entry-fields" id="transferFields" hidden>
-        <div class="field-label">Кто кому передал</div>
-        <div class="group-toggle stacked" id="transferDir"></div>
-        <p class="field-help">Общий остаток не меняется — деньги переходят из личного остатка одного в личный остаток другого.</p>
+        <div class="group-toggle" id="transferMode">
+          <button type="button" data-mode="people" class="selected">Между нами</button>
+          <button type="button" data-mode="accounts">Между счетами</button>
+        </div>
+        <div id="transferPeople">
+          <div class="field-label">Кто кому передал</div>
+          <div class="group-toggle stacked" id="transferDir"></div>
+          <p class="field-help">Общий остаток не меняется — деньги переходят из личного остатка одного в личный остаток другого.</p>
+        </div>
+        <div id="transferAccounts" hidden>
+          <div class="field-label">Откуда</div>
+          <div class="date-row account-row" id="moveFrom"></div>
+          <div class="field-label">Куда</div>
+          <div class="date-row account-row" id="moveTo"></div>
+          <p class="field-help">Снятие наличных или перевод между своими картами — не трата: остатки не меняются, деньги просто переходят с одного счёта на другой.</p>
+        </div>
       </div>
 
       <div class="entry-fields" id="payerRow" hidden>
@@ -379,6 +392,7 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       </div>
 
       <button class="sheet-submit" id="submitBtn" type="button">Сохранить <span>↗</span></button>
+      <button class="text-button sheet-to-move" id="sheetToMove" type="button" hidden>🏧 Это было снятие наличных, а не трата</button>
       <button class="sheet-delete" id="sheetDelete" type="button" hidden>Удалить запись</button>
     </div>
   </div>
@@ -726,7 +740,8 @@ $authUrl = rtrim($config['app_url'] ?? '', '/') . '/auth.php';
       <p class="limits-help">Карты и наличные. Остаток счёта считается по его операциям; выписки и чеки привязываются сами, а вручную счёт выбирается в форме записи.</p>
       <div class="deposit-total" id="accountsTotal"></div>
       <div id="accountsList" class="debts-list"></div>
-      <button type="button" class="sheet-submit" id="accountAdd">+ Новый счёт</button>
+      <button type="button" class="sheet-submit" id="accountMove">🏧 Снять наличные / перевести</button>
+      <button type="button" class="text-button account-add" id="accountAdd">+ Новый счёт</button>
     </div>
   </div>
 </div>

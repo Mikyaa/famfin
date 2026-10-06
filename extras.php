@@ -33,6 +33,10 @@ function accounts_list(): array {
   foreach (db()->query("SELECT DISTINCT account FROM balance_adjustments WHERE account<>''") as $r) $names[(string)$r['account']] ??= 'card';
   $counts = [];
   foreach (db()->query("SELECT import_account a,COUNT(*) n FROM transactions WHERE import_account IS NOT NULL GROUP BY import_account") as $r) $counts[(string)$r['a']] = (int)$r['n'];
+  foreach (['from_account', 'to_account'] as $col) foreach (db()->query("SELECT $col a,COUNT(*) n FROM transfers WHERE $col IS NOT NULL AND $col<>'' GROUP BY $col") as $r) {
+    $names[(string)$r['a']] ??= 'card';
+    $counts[(string)$r['a']] = ($counts[(string)$r['a']] ?? 0) + (int)$r['n'];
+  }
   $today = date('Y-m-d');
   $out = [];
   foreach ($names as $name => $kind) $out[] = ['name' => (string)$name, 'kind' => $kind, 'balance' => round(account_net((string)$name, $today), 2), 'count' => $counts[$name] ?? 0];
@@ -56,6 +60,8 @@ function account_rename(string $old, string $new, string $kind): void {
   try {
     $pdo->prepare('UPDATE transactions SET import_account=? WHERE import_account=?')->execute([$new, $old]);
     $pdo->prepare('UPDATE balance_adjustments SET account=? WHERE account=?')->execute([$new, $old]);
+    $pdo->prepare('UPDATE transfers SET from_account=? WHERE from_account=?')->execute([$new, $old]);
+    $pdo->prepare('UPDATE transfers SET to_account=? WHERE to_account=?')->execute([$new, $old]);
     $pdo->prepare('DELETE FROM accounts WHERE name=?')->execute([$old]);
     $pdo->commit();
   } catch (Throwable $e) { $pdo->rollBack(); throw $e; }
@@ -66,6 +72,8 @@ function account_rename(string $old, string $new, string $kind): void {
 // Removes the account from the list; its operations stay, just without an account
 function account_delete(string $name): void {
   db()->prepare('UPDATE transactions SET import_account=NULL WHERE import_account=?')->execute([$name]);
+  db()->prepare('UPDATE transfers SET from_account=NULL WHERE from_account=?')->execute([$name]);
+  db()->prepare('UPDATE transfers SET to_account=NULL WHERE to_account=?')->execute([$name]);
   db()->prepare('DELETE FROM balance_adjustments WHERE account=?')->execute([$name]);
   db()->prepare('DELETE FROM accounts WHERE name=?')->execute([$name]);
   mark_balance_changed();
@@ -76,7 +84,113 @@ function account_operations(string $name, int $limit = 60): array {
   $q->execute([$name]);
   $rows = $q->fetchAll();
   foreach ($rows as &$r) $r['group'] = category_group_of($r['category'], $r['cg'] ?: null);
-  return $rows;
+  unset($r);
+  $q = db()->prepare('SELECT id,from_id,to_id,amount,note,occurred_on,from_account,to_account FROM transfers WHERE from_account=? OR to_account=? ORDER BY occurred_on DESC,id DESC LIMIT ' . max(1, min(500, $limit)));
+  $q->execute([$name, $name]);
+  $names = allowed_members_map();
+  foreach ($q as $t) $rows[] = transfer_row($t, $names);
+  usort($rows, fn($a, $b) => [$b['occurred_on'], $b['id']] <=> [$a['occurred_on'], $a['id']]);
+  return array_slice($rows, 0, $limit);
+}
+
+/* ========== MOVES BETWEEN ACCOUNTS ========== */
+// Cash taken from an ATM, money moved card to card: not spending and not income.
+// Stored as a transfer of a member to themselves, so personal and shared balances stay as they are;
+// only the two accounts change.
+const CASH_ACCOUNT = 'Наличные';
+
+function account_exists(string $name): bool {
+  $q = db()->prepare('SELECT COUNT(*) FROM accounts WHERE name=?');
+  $q->execute([$name]);
+  return (int)$q->fetchColumn() > 0;
+}
+
+// The cash wallet: the first account of kind "cash", created on first use
+function cash_account(): string {
+  $n = db()->query("SELECT name FROM accounts WHERE kind='cash' ORDER BY name LIMIT 1")->fetchColumn();
+  if ($n !== false) return (string)$n;
+  account_add(CASH_ACCOUNT, 'cash');
+  return CASH_ACCOUNT;
+}
+
+// The card a member usually pays from: the account most of their operations carry
+function main_card_of(int $memberId): string {
+  $q = db()->prepare("SELECT t.import_account a,COUNT(*) n FROM transactions t LEFT JOIN accounts x ON x.name=t.import_account
+    WHERE t.telegram_id=? AND t.import_account IS NOT NULL AND t.import_account<>'' AND COALESCE(x.kind,'card')<>'cash' GROUP BY t.import_account ORDER BY n DESC LIMIT 1");
+  $q->execute([$memberId]);
+  return (string)($q->fetchColumn() ?: '');
+}
+
+function add_account_move(int $memberId, string $from, string $to, $amount, string $note, string $date, int $createdBy, ?string $key = null): int {
+  $from = trim($from); $to = trim($to); $note = trim($note);
+  $a = parse_amount($amount);
+  if (!is_member_id($memberId)) throw new RuntimeException('Неверный участник');
+  if ($from === $to) throw new RuntimeException('Выберите два разных счёта');
+  if ($a === null || !valid_date($date) || mb_strlen($note) > 500) throw new RuntimeException('Проверьте сумму и дату перевода');
+  foreach ([$from, $to] as $n) if ($n !== '' && !account_exists($n)) account_add($n, $n === CASH_ACCOUNT ? 'cash' : 'card');
+  db()->prepare('INSERT INTO transfers(from_id,to_id,amount,note,occurred_on,created_by,from_account,to_account,import_key) VALUES(?,?,?,?,?,?,?,?,?)')
+    ->execute([$memberId, $memberId, $a, $note, $date, $createdBy, $from ?: null, $to ?: null, $key]);
+  $id = (int)db()->lastInsertId();
+  mark_balance_changed();
+  audit('create', 'transfer', $id, transfer_summary(['from_id' => $memberId, 'to_id' => $memberId, 'from_account' => $from, 'to_account' => $to, 'amount' => $a, 'occurred_on' => $date]));
+  return $id;
+}
+
+// An expense that was really a withdrawal (imported or typed before this feature): becomes a move to cash
+function transaction_to_move(int $txId, int $actorId): int {
+  $tx = get_transaction($txId);
+  if (!$tx || $tx['kind'] !== 'expense') throw new RuntimeException('Перевести в снятие можно только расход');
+  if (!empty($tx['orig_currency'])) throw new RuntimeException('Операция в валюте — снятие записывается в тенге');
+  $cash = cash_account();
+  $from = (string)($tx['import_account'] ?? '');
+  if ($from === $cash) throw new RuntimeException('Эта трата уже с наличных');
+  $pdo = db();
+  $pdo->beginTransaction();
+  try {
+    // Not into the trash: restoring the expense next to the move would count the money twice
+    audit_mute(true);
+    try { delete_transaction($txId); } finally { audit_mute(false); }
+    $id = add_account_move((int)$tx['telegram_id'], $from, $cash, $tx['amount'], (string)$tx['note'], (string)$tx['occurred_on'], $actorId, $tx['import_key'] ?: null);
+    $pdo->commit();
+  } catch (Throwable $e) { $pdo->rollBack(); throw $e; }
+  return $id;
+}
+
+// Text entries: "снял 20000", "сняла 50к", "обналичил 10000" are withdrawals;
+// "кафе 5000 наличными" is an ordinary expense paid from the cash wallet
+function is_withdrawal_text(string $text): bool {
+  return (bool)preg_match('/(^|[^\p{L}])(снял[аи]?|сниму|снимаю|сняти[ея]|обналичил[аи]?|банкомат\p{L}*)([^\p{L}]|$)/u', mb_strtolower($text));
+}
+
+function paid_in_cash(string $text): bool {
+  return (bool)preg_match('/(^|[^\p{L}])(наличн\p{L}*|наличк\p{L}*|нал|кэш\p{L}*|кеш\p{L}*)([^\p{L}]|$)/u', mb_strtolower($text));
+}
+
+// The entry (from parse_entry_text) without the "наличными" word, with the cash account set
+function entry_paid_in_cash(array $e): array {
+  $e['note'] = trim(preg_replace('/(^|\s)(наличн\p{L}*|наличк\p{L}*|нал|кэш\p{L}*|кеш\p{L}*)(?=\s|$)/iu', ' ', (string)$e['note']));
+  $e['note'] = trim(preg_replace('/\s{2,}/u', ' ', $e['note']));
+  if ($e['category'] === null && $e['note'] !== '') $e['category'] = categorize_text($e['note']);
+  if ($e['category'] !== null && $e['note'] !== '' && mb_stripos($e['category'], $e['note']) === 0) $e['note'] = '';
+  $e['account'] = cash_account();
+  return $e;
+}
+
+function save_withdrawal(int $userId, array $e): array {
+  // Abroad the card is charged in tenge: the move is kept in tenge, the original amount goes to the note
+  $currency = (string)($e['currency'] ?? 'KZT');
+  $amount = to_kzt((float)$e['amount'], $currency);
+  $note = $currency !== 'KZT' ? fmt_cur((float)$e['amount'], $currency) . ' по курсу НБ РК' : '';
+  $from = main_card_of($userId);
+  $to = cash_account();
+  $id = add_account_move($userId, $from, $to, $amount, $note, $e['date'], $userId);
+  $e['amount'] = $amount;
+  return ['id' => $id, 'from' => $from, 'to' => $to, 'amount' => (float)$e['amount'], 'date' => $e['date']];
+}
+
+function withdrawal_text(array $w, string $who, string $head = '🏧 Снятие наличных'): string {
+  $day = $w['date'] === date('Y-m-d') ? 'сегодня' : ($w['date'] === date('Y-m-d', strtotime('-1 day')) ? 'вчера' : (new DateTimeImmutable($w['date']))->format('d.m.Y'));
+  return "$head " . fmt_money($w['amount']) . "\n" . ($w['from'] ?: 'без счёта') . ' → ' . $w['to'] . "\nЭто не трата: общий и личный остаток не меняются, деньги просто лежат в «{$w['to']}».\n👤 $who · $day";
 }
 
 /* ========== CATEGORY MANAGEMENT ========== */

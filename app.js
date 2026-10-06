@@ -289,7 +289,7 @@ function animateClose(el, animClass = 'closing'){
 }
 
 /* ========== SHEET: ENTRY (add, edit, transfer) ========== */
-const sheetState = {mode:'add', editId:null, kind:'expense', amount:'', category:null, group:'variable', date:todayISO(), dateMode:'today', note:'', payerId:null, from:null, to:null, account:'', currency:'KZT', split:'', photoData:null, hasPhoto:false, prevCategory:null};
+const sheetState = {mode:'add', editId:null, kind:'expense', amount:'', category:null, group:'variable', date:todayISO(), dateMode:'today', note:'', payerId:null, from:null, to:null, transferMode:'people', moveFrom:'', moveTo:'', account:'', currency:'KZT', split:'', photoData:null, hasPhoto:false, prevCategory:null};
 // Foreign amounts are converted at the National Bank rate on the server; the sheet shows the estimate
 const FX_ORDER = ['KZT', 'USD', 'EUR', 'RUB'];
 const fxRate = c => c === 'KZT' ? 1 : Number(mainCache?.fx?.[c] || 0);
@@ -343,6 +343,45 @@ function renderTransferDir(){
   });
 }
 
+// Between accounts: from a card (or "Без счёта") to cash or another card. A cash wallet is offered even before it exists.
+const CASH_NAME = 'Наличные';
+const cashAccountName = () => (accountsCache.find(a => a.kind === 'cash') || {}).name || CASH_NAME;
+function moveDefaults(){
+  const cash = cashAccountName();
+  let last = '';
+  try { last = localStorage.getItem('fb_last_account') || ''; } catch {}
+  const cards = accountsCache.filter(a => a.kind !== 'cash');
+  const from = cards.some(a => a.name === last) ? last : (cards[0]?.name || '');
+  return {moveFrom: from, moveTo: from === cash ? '' : cash};
+}
+function renderMoveRows(){
+  const names = accountsCache.map(a => a.name);
+  if (!names.includes(cashAccountName())) names.push(cashAccountName());
+  const chip = (attr, n, sel, label) => `<button type="button" data-${attr}="${safe(n)}" class="${sel ? 'selected' : ''}">${safe(label || n)}</button>`;
+  $('#moveFrom').innerHTML = [chip('from', '', !sheetState.moveFrom, 'Без счёта'), ...names.map(n => chip('from', n, sheetState.moveFrom === n))].join('');
+  $('#moveTo').innerHTML = names.map(n => chip('to', n, sheetState.moveTo === n, n === cashAccountName() ? '💵 ' + n : n)).join('');
+  $$('#moveFrom button').forEach(b => b.onclick = () => {
+    sheetState.moveFrom = b.dataset.from;
+    if (sheetState.moveTo === sheetState.moveFrom) sheetState.moveTo = '';
+    haptic('select'); renderMoveRows();
+  });
+  $$('#moveTo button').forEach(b => b.onclick = () => {
+    sheetState.moveTo = b.dataset.to;
+    if (sheetState.moveFrom === sheetState.moveTo) sheetState.moveFrom = '';
+    haptic('select'); renderMoveRows();
+  });
+}
+function applyTransferMode(){
+  const many = familyMembers().length >= 2;
+  if (!many) sheetState.transferMode = 'accounts';
+  $('#transferMode').hidden = !many;
+  $$('#transferMode button').forEach(b => b.classList.toggle('selected', b.dataset.mode === sheetState.transferMode));
+  $('#transferPeople').hidden = sheetState.transferMode !== 'people';
+  $('#transferAccounts').hidden = sheetState.transferMode !== 'accounts';
+  if (sheetState.transferMode === 'accounts') renderMoveRows();
+}
+$$('#transferMode button').forEach(b => b.onclick = () => { sheetState.transferMode = b.dataset.mode; haptic('select'); applyTransferMode(); });
+
 function renderPayerToggle(){
   $('#payerToggle').innerHTML = familyMembers().map(m => `<button type="button" data-id="${m.id}" class="${m.id === sheetState.payerId ? 'selected' : ''}">${safe(m.name)}</button>`).join('');
   $$('#payerToggle button').forEach(b => b.onclick = () => { sheetState.payerId = Number(b.dataset.id); haptic('select'); renderPayerToggle(); });
@@ -351,7 +390,7 @@ function renderPayerToggle(){
 function applyKindUI(){
   const k = sheetState.kind;
   $$('#kindToggle button').forEach(b => b.classList.toggle('selected', b.dataset.kind === k));
-  $('#kindTransfer').hidden = sheetState.mode === 'edit' || familyMembers().length < 2;
+  $('#kindTransfer').hidden = sheetState.mode === 'edit';
   $('#kindToggle').classList.toggle('three', !$('#kindTransfer').hidden);
   $('#entryFields').hidden = k === 'transfer';
   $('#transferFields').hidden = k !== 'transfer';
@@ -361,6 +400,8 @@ function applyKindUI(){
   $('#splitField').hidden = k !== 'expense' || familyMembers().length < 2;
   $('#photoRow').hidden = k === 'transfer';
   $('#noteInput').placeholder = k === 'transfer' ? 'Например, на продукты' : 'Например, продукты на неделю';
+  $('#sheetToMove').hidden = !(sheetState.mode === 'edit' && k === 'expense' && !sheetState.currencyLocked);
+  if (k === 'transfer') applyTransferMode();
   updateLimitHint();
 }
 
@@ -372,14 +413,14 @@ function setDateButtons(){
   $('#customDateLabel').textContent = mode === 'custom' ? fmtDate(sheetState.date) : 'Выбрать';
 }
 
-function openSheet(tx = null){
+function openSheet(tx = null, opts = {}){
   afterSaveHook = null;
   const other = familyMembers().find(m => m.id !== myId());
   Object.assign(sheetState, {
     mode: tx ? 'edit' : 'add', editId: tx ? Number(tx.id) : null, kind: tx ? tx.kind : 'expense',
     amount: tx ? String(Number(tx.amount)) : '', category: tx ? tx.category : null, group: tx ? (tx.group || 'variable') : 'variable',
     date: tx ? tx.occurred_on : todayISO(), note: tx ? (tx.note || '') : '', payerId: tx ? Number(tx.telegram_id) : myId(),
-    from: myId(), to: other ? other.id : null,
+    from: myId(), to: other ? other.id : null, transferMode: 'people', ...moveDefaults(),
     account: tx ? (tx.account || '') : (() => { try { const last = localStorage.getItem('fb_last_account') || ''; return accountsCache.some(a => a.name === last) ? last : ''; } catch { return ''; } })(),
   });
   sheetState.currency = tx?.orig_currency || (!tx && mainCache?.trip ? mainCache.trip.currency : 'KZT');
@@ -391,6 +432,8 @@ function openSheet(tx = null){
   renderSplit();
   renderPhotoRow(tx);
   if (tx?.orig_currency) sheetState.amount = String(Number(tx.orig_amount));
+  sheetState.currencyLocked = Boolean(tx?.orig_currency);
+  if (opts.move) { sheetState.kind = 'transfer'; sheetState.transferMode = 'accounts'; }
   $('#sheetTitle').textContent = tx ? 'Изменить запись' : 'Новая запись';
   $('#noteInput').value = sheetState.note;
   delete $('#amountInput').dataset.touched;
@@ -492,6 +535,17 @@ function bindSheet(){
     updateLimitHint();
   };
   $('#submitBtn').onclick = submitEntry;
+  $('#sheetToMove').onclick = async () => {
+    if (!sheetState.editId) return;
+    if (!(await showConfirm(`Записать как снятие наличных? Трата исчезнет из расходов, а сумма перейдёт со счёта в «${cashAccountName()}».`))) return;
+    try {
+      await request('api.php?action=tx_to_move', {method:'POST', body: JSON.stringify({id: sheetState.editId})});
+      haptic('success');
+      notice('Теперь это снятие наличных ✓', true);
+      await closeSheet(true);
+      await reloadAfterChange();
+    } catch(e) { haptic('error'); notice(e.message); }
+  };
   $('#sheetDelete').onclick = async () => {
     if (!sheetState.editId) return;
     if (!(await showConfirm('Удалить эту операцию?'))) return;
@@ -581,7 +635,12 @@ async function submitEntry(){
   if (!amount || amount <= 0) { haptic('error'); notice('Введите сумму'); $('#amountInput').focus(); return; }
   const note = $('#noteInput').value.trim();
   let url, body, okText;
-  if (sheetState.kind === 'transfer') {
+  if (sheetState.kind === 'transfer' && sheetState.transferMode === 'accounts') {
+    if (!sheetState.moveTo) { haptic('error'); notice('Выберите, куда перевели'); return; }
+    url = 'api.php?action=account_move';
+    body = {from: sheetState.moveFrom, to: sheetState.moveTo, amount, note, date: sheetState.date};
+    okText = 'Перевод между счетами записан ✓';
+  } else if (sheetState.kind === 'transfer') {
     if (!sheetState.from || !sheetState.to) { notice('Выберите, кто кому передал'); return; }
     url = 'api.php?action=transfer';
     body = {from_id: sheetState.from, to_id: sheetState.to, amount, note, date: sheetState.date};
@@ -644,6 +703,18 @@ async function deleteRecord(id, el, type = 'tx'){
 
 /* ========== OPERATION LISTS ========== */
 function txRowHtml(t){
+  if (t.type === 'transfer' && t.move) {
+    const atm = t.to_account === cashAccountName();
+    return `<article class="transaction transfer" data-type="transfer" data-id="${t.id}">
+      <i class="tx-icon transfer">${atm ? '🏧' : '⇄'}</i>
+      <div class="tx-main">
+        <div class="tx-title">${safe(t.from_account || 'Без счёта')} → ${safe(t.to_account || 'Без счёта')}</div>
+        <div class="tx-meta">${atm ? 'Снятие наличных' : 'Между счетами'} · ${safe(t.from_name)}${t.note ? ' · ' + safe(t.note) : ''}</div>
+      </div>
+      <b class="tx-amount transfer">${money(t.amount)}</b>
+      <button class="tx-delete" aria-label="Удалить перевод" data-delete="${t.id}">×</button>
+    </article>`;
+  }
   if (t.type === 'transfer') {
     return `<article class="transaction transfer" data-type="transfer" data-id="${t.id}">
       <i class="tx-icon transfer">⇄</i>
@@ -1728,7 +1799,7 @@ function renderImportRows(){
       <span class="import-main">
         <span class="import-top"><b>${safe(r.note || r.type)}</b><b class="tx-amount ${r.kind}">${r.kind === 'expense' ? '−' : '+'}${money(r.amount)}</b></span>
         <span class="import-meta">${fmtDate(r.date)} · ${safe(r.type)}${r.dup === 'imported' ? ' · <em>уже импортирована раньше</em>' : r.dup === 'manual' ? ' · <em>уже записана вручную</em>' : ''}</span>
-        <select data-cat="${i}" aria-label="Категория">${cats.map(x => `<option ${x === r.category ? 'selected' : ''}>${safe(x)}</option>`).join('')}</select>
+        ${r.cash ? `<span class="import-meta">🏧 Перевод в «${safe(cashAccountName())}» — не трата</span>` : `<select data-cat="${i}" aria-label="Категория">${cats.map(x => `<option ${x === r.category ? 'selected' : ''}>${safe(x)}</option>`).join('')}</select>`}
       </span>
     </label>`;
   }).join('');
@@ -1738,18 +1809,18 @@ function renderImportRows(){
 }
 function syncImportSummary(){
   const sel = importRows.filter(r => r.include);
-  const sum = sel.reduce((s, r) => s + (r.kind === 'expense' ? r.amount : 0), 0);
-  $('#importSummary').innerHTML = `Найдено ${importRows.length} операций. Выбрано <b>${sel.length}</b>${sum ? `, расходов на <b>${money(sum)} ${cur(currency)}</b>` : ''}. Переводы, пополнения и уже записанные операции не отмечены — проверьте их сами.`;
+  const sum = sel.reduce((s, r) => s + (r.kind === 'expense' && !r.cash ? r.amount : 0), 0);
+  $('#importSummary').innerHTML = `Найдено ${importRows.length} операций. Выбрано <b>${sel.length}</b>${sum ? `, расходов на <b>${money(sum)} ${cur(currency)}</b>` : ''}. Снятия наличных запишутся переводом с карты в «${safe(cashAccountName())}», не тратой. Переводы и уже записанные операции не отмечены — проверьте их сами.`;
   $('#importConfirm').disabled = !sel.length;
   $('#importConfirm').textContent = sel.length ? `Импортировать ${sel.length}` : 'Ничего не выбрано';
 }
 $('#importConfirm').onclick = async () => {
-  const rows = importRows.filter(r => r.include).map(r => ({kind: r.kind, amount: r.amount, category: r.category, note: r.note, date: r.date, key: r.key, type: r.type, payer_id: r.payer_id, account: r.account}));
+  const rows = importRows.filter(r => r.include).map(r => ({kind: r.kind, amount: r.amount, category: r.category, note: r.note, date: r.date, key: r.key, type: r.type, payer_id: r.payer_id, account: r.account, cash: r.cash}));
   const btn = $('#importConfirm'); btn.disabled = true;
   try {
     const d = await request('api.php?action=import', {method:'POST', body: JSON.stringify({rows, payer_id: importPayer})});
     haptic('success');
-    notice(`Импортировано: ${d.imported}` + (d.linked ? ` · совпали с ручными: ${d.linked}` : '') + (d.skipped ? ` · уже были: ${d.skipped}` : '') + ' ✓', true);
+    notice(`Импортировано: ${d.imported}` + (d.cash ? ` · снятий наличных: ${d.cash}` : '') + (d.linked ? ` · совпали с ручными: ${d.linked}` : '') + (d.skipped ? ` · уже были: ${d.skipped}` : '') + ' ✓', true);
     await closeImport(); await reloadAfterChange();
   } catch(e) { haptic('error'); notice(e.message); btn.disabled = false; }
 };
@@ -2097,6 +2168,7 @@ $('#accountDelete').onclick = async () => {
 };
 $('#accountsOpen').onclick = openAccountsSheet;
 $('#accountAdd').onclick = () => openAccountModal();
+$('#accountMove').onclick = async () => { await closeAccountsSheet(); openSheet(null, {move: true}); };
 $('#accountEdit').onclick = () => openAccountModal(accountOpen);
 $$('#accountsSheet [data-accounts-close]').forEach(el => el.onclick = closeAccountsSheet);
 $$('#accountSheet [data-account-sheet-close]').forEach(el => el.onclick = closeAccount);

@@ -230,6 +230,7 @@ function add_transfer(int $from, int $to, $amount, string $note, string $date, i
 
 function transfer_summary(array $t): string {
   $n = allowed_members_map();
+  if (is_account_move($t)) return 'Перевод между счетами ' . (($t['from_account'] ?? '') ?: 'без счёта') . ' → ' . (($t['to_account'] ?? '') ?: 'без счёта') . ' ' . fmt_money((float)$t['amount']) . ' · ' . (new DateTimeImmutable($t['occurred_on']))->format('d.m.Y');
   return 'Перевод ' . ($n[(int)$t['from_id']] ?? '?') . ' → ' . ($n[(int)$t['to_id']] ?? '?') . ' ' . fmt_money((float)$t['amount']) . ' · ' . (new DateTimeImmutable($t['occurred_on']))->format('d.m.Y');
 }
 
@@ -240,21 +241,27 @@ function delete_transfer(int $id): bool {
   if (!$old) return false;
   db()->prepare('DELETE FROM transfers WHERE id=?')->execute([$id]);
   mark_balance_changed();
-  trash_put('transfer', $old, transfer_summary($old));
+  if (empty($GLOBALS['FAMFIN_AUDIT_MUTE'])) trash_put('transfer', $old, transfer_summary($old));
   audit('delete', 'transfer', $id, transfer_summary($old));
   return true;
 }
 
 function list_transfers(int $limit = 10): array {
   $names = allowed_members_map();
-  $q = db()->prepare('SELECT id,from_id,to_id,amount,note,occurred_on FROM transfers ORDER BY occurred_on DESC,id DESC LIMIT ' . max(1, min(200, $limit)));
+  $q = db()->prepare('SELECT id,from_id,to_id,amount,note,occurred_on,from_account,to_account FROM transfers ORDER BY occurred_on DESC,id DESC LIMIT ' . max(1, min(200, $limit)));
   $q->execute();
-  $out = [];
-  foreach ($q as $r) {
-    $out[] = ['id' => (int)$r['id'], 'type' => 'transfer', 'amount' => (float)$r['amount'], 'note' => $r['note'], 'occurred_on' => $r['occurred_on'],
-      'from_id' => (int)$r['from_id'], 'to_id' => (int)$r['to_id'], 'from_name' => $names[(int)$r['from_id']] ?? '?', 'to_name' => $names[(int)$r['to_id']] ?? '?'];
-  }
-  return $out;
+  return array_map(fn($r) => transfer_row($r, $names), $q->fetchAll());
+}
+
+function transfer_row(array $r, array $names): array {
+  return ['id' => (int)$r['id'], 'type' => 'transfer', 'amount' => (float)$r['amount'], 'note' => $r['note'], 'occurred_on' => $r['occurred_on'],
+    'from_id' => (int)$r['from_id'], 'to_id' => (int)$r['to_id'], 'from_name' => $names[(int)$r['from_id']] ?? '?', 'to_name' => $names[(int)$r['to_id']] ?? '?',
+    'move' => is_account_move($r), 'from_account' => (string)($r['from_account'] ?? ''), 'to_account' => (string)($r['to_account'] ?? '')];
+}
+
+// A transfer of a member to themselves between two accounts (cash withdrawal, card to card)
+function is_account_move(array $t): bool {
+  return (int)$t['from_id'] === (int)$t['to_id'] && (($t['from_account'] ?? '') !== '' || ($t['to_account'] ?? '') !== '');
 }
 
 // [member id => net change of personal balance] from transfers before $until
@@ -474,7 +481,7 @@ function search_operations(string $query, int $limit = 100): array {
 
 /* ========== BANK STATEMENT IMPORT ========== */
 // Parses text of a Kaspi Gold statement ("01.10.26  - 3 450,00 ₸  Покупка  MAGNUM ...").
-// Purchases are pre-selected; transfers, top-ups, withdrawals and duplicates are offered unticked.
+// Purchases, top-ups and cash withdrawals (a move card → cash) are pre-selected; transfers and duplicates are offered unticked.
 function parse_bank_statement(string $text, int $payerId): array {
   $meta = parse_statement_meta($text);
   $text = str_replace(["\u{00A0}", "\u{2009}", "\u{202F}", "\r"], [' ', ' ', ' ', ''], $text);
@@ -511,9 +518,12 @@ function parse_bank_statement(string $text, int $payerId): array {
     } else {
       $category = categorize_text($details) ?? 'Другое';
     }
-    $main = ($isPurchase && $kind === 'expense') || $incoming;
+    // ATM withdrawal: the money stays ours, it moves from the card to cash
+    $cash = $kind === 'expense' && str_starts_with($type, 'сняти');
+    if ($cash) $category = 'Снятие наличных';
+    $main = ($isPurchase && $kind === 'expense') || $incoming || $cash;
     $rows[] = ['date' => $date, 'kind' => $kind, 'amount' => $amount, 'type' => $x[6], 'note' => mb_substr($details, 0, 200),
-      'category' => $category, 'group' => category_group_of($category), 'purchase' => $isPurchase && $kind === 'expense',
+      'category' => $category, 'group' => category_group_of($category), 'purchase' => $isPurchase && $kind === 'expense', 'cash' => $cash,
       'incoming' => $incoming, 'main' => $main, 'payer_id' => $owner, 'account' => $meta['account'],
       'include' => $main, 'duplicate' => false, 'dup' => null];
   }
@@ -538,9 +548,11 @@ function statement_keys(array $rows): array {
 function existing_import_keys(array $keys): array {
   $found = [];
   foreach (array_chunk(array_values(array_unique(array_filter($keys))), 400) as $chunk) {
-    $q = db()->prepare('SELECT import_key FROM transactions WHERE import_key IN (' . implode(',', array_fill(0, count($chunk), '?')) . ')');
-    $q->execute($chunk);
-    foreach ($q->fetchAll(PDO::FETCH_COLUMN) as $k) $found[$k] = true;
+    foreach (['transactions', 'transfers'] as $table) {
+      $q = db()->prepare("SELECT import_key FROM $table WHERE import_key IN (" . implode(',', array_fill(0, count($chunk), '?')) . ')');
+      $q->execute($chunk);
+      foreach ($q->fetchAll(PDO::FETCH_COLUMN) as $k) $found[$k] = true;
+    }
   }
   return $found;
 }
@@ -551,7 +563,15 @@ function manual_matches(int $payerId, string $from, string $to): array {
   $q->execute([$payerId, $from, $to]);
   $pool = [];
   foreach ($q as $r) $pool[$r['occurred_on'] . '|' . $r['kind'] . '|' . number_format((float)$r['amount'], 2, '.', '')][] = (int)$r['id'];
+  // Withdrawals typed by hand ("снял 20000"): moves of this member into an account, keyed as kind "cash"
+  $q = db()->prepare('SELECT id,occurred_on,amount FROM transfers WHERE import_key IS NULL AND from_id=? AND to_id=? AND to_account IS NOT NULL AND occurred_on>=? AND occurred_on<=? ORDER BY id');
+  $q->execute([$payerId, $payerId, $from, $to]);
+  foreach ($q as $r) $pool[$r['occurred_on'] . '|cash|' . number_format((float)$r['amount'], 2, '.', '')][] = (int)$r['id'];
   return $pool;
+}
+
+function statement_match_key(array $r): string {
+  return $r['date'] . '|' . (!empty($r['cash']) ? 'cash' : $r['kind']) . '|' . number_format((float)$r['amount'], 2, '.', '');
 }
 
 // dup = 'imported' (label already in the budget) or 'manual' (same entry typed by hand)
@@ -568,7 +588,7 @@ function mark_statement_duplicates(array $rows, int $payerId): array {
     $row['dup'] = null;
     if (isset($known[$row['key']])) $row['dup'] = 'imported';
     else {
-      $k = $row['date'] . '|' . $row['kind'] . '|' . number_format((float)$row['amount'], 2, '.', '');
+      $k = statement_match_key($row);
       if (!empty($pool[$k])) { array_shift($pool[$k]); $row['dup'] = 'manual'; }
     }
     unset($pool);
@@ -590,12 +610,18 @@ function import_rows(array $rows, int $payerId): array {
   foreach ($rows as $i => $r) {
     try {
       $owner = (int)($r['payer_id'] ?? 0);
-      $entries[] = validate_entry($r) + ['key' => $r['key'], 'owner' => is_member_id($owner) ? $owner : $payerId, 'account' => (string)($r['account'] ?? '')];
+      $extra = ['key' => $r['key'], 'owner' => is_member_id($owner) ? $owner : $payerId, 'account' => (string)($r['account'] ?? ''), 'cash' => !empty($r['cash'])];
+      if ($extra['cash']) {
+        $a = parse_amount($r['amount'] ?? null);
+        if ($a === null || !valid_date((string)($r['date'] ?? ''))) throw new RuntimeException('Проверьте сумму и дату');
+        $entries[] = ['kind' => 'expense', 'amount' => $a, 'date' => (string)$r['date'], 'note' => mb_substr(trim((string)($r['note'] ?? '')), 0, 500)] + $extra;
+      } else $entries[] = validate_entry($r) + $extra;
     }
     catch (RuntimeException $e) { throw new RuntimeException('Строка ' . ($i + 1) . ': ' . $e->getMessage()); }
   }
-  $result = ['ids' => [], 'linked' => [], 'skipped' => 0];
+  $result = ['ids' => [], 'linked' => [], 'skipped' => 0, 'moves' => [], 'linked_moves' => []];
   if (!$entries) return $result;
+  $cashAccount = array_filter($entries, fn($e) => $e['cash']) ? cash_account() : '';
   $pdo = db();
   $pdo->beginTransaction();
   try {
@@ -607,7 +633,22 @@ function import_rows(array $rows, int $payerId): array {
     foreach ($entries as $e) {
       if (isset($known[$e['key']])) { $result['skipped']++; continue; }
       $pools[$e['owner']] ??= manual_matches($e['owner'], min($dates), max($dates));
-      $k = $e['date'] . '|' . $e['kind'] . '|' . number_format((float)$e['amount'], 2, '.', '');
+      $k = statement_match_key($e);
+      if ($e['cash']) {
+        // A withdrawal: a move from the statement's card to cash, or the label on one typed by hand
+        if (!empty($pools[$e['owner']][$k])) {
+          $id = array_shift($pools[$e['owner']][$k]);
+          // The statement knows the card the hand-typed withdrawal did not
+          $pdo->prepare("UPDATE transfers SET import_key=?,from_account=COALESCE(NULLIF(from_account,''),?) WHERE id=? AND import_key IS NULL")->execute([$e['key'], $e['account'] ?: null, $id]);
+          $result['linked_moves'][] = $id;
+        } else {
+          audit_mute(true);
+          try { $result['moves'][] = add_account_move($e['owner'], $e['account'], $cashAccount, $e['amount'], $e['note'] ?: 'Снятие наличных', $e['date'], actor() ?: $payerId, $e['key']); }
+          finally { audit_mute(false); }
+        }
+        $known[$e['key']] = true;
+        continue;
+      }
       if (!empty($pools[$e['owner']][$k])) {
         $id = array_shift($pools[$e['owner']][$k]);
         $link->execute([$e['key'], $e['account'] ?: null, $id]);
@@ -621,18 +662,24 @@ function import_rows(array $rows, int $payerId): array {
     $pdo->commit();
   } catch (Throwable $e) { $pdo->rollBack(); throw $e; }
   if ($result['ids']) mark_balance_changed();
-  if ($result['ids'] || $result['linked']) audit('import', 'transaction', null, 'Выписка: ' . count($result['ids']) . ' новых, ' . count($result['linked']) . ' связано с ручными');
+  if ($result['ids'] || $result['linked'] || $result['moves']) audit('import', 'transaction', null, 'Выписка: ' . count($result['ids']) . ' новых, ' . count($result['linked']) . ' связано с ручными'
+    . ($result['moves'] ? ', снятий наличных ' . count($result['moves']) : ''));
   return $result;
 }
 
-// "Undo import": removes created operations and unlinks manual ones
-function undo_import(array $ids, array $linked): int {
+// "Undo import": removes created operations and withdrawals, unlinks manual ones
+function undo_import(array $ids, array $linked, array $moves = [], array $linkedMoves = []): int {
   $n = 0;
   audit_mute(true);
-  try { foreach ($ids as $id) if (delete_transaction((int)$id)) $n++; } finally { audit_mute(false); }
+  try {
+    foreach ($ids as $id) if (delete_transaction((int)$id)) $n++;
+    foreach ($moves as $id) if (delete_transfer((int)$id)) $n++;
+  } finally { audit_mute(false); }
   if ($n) audit('delete', 'transaction', null, "Отмена импорта: удалено $n операций");
   $q = db()->prepare('UPDATE transactions SET import_key=NULL,import_account=NULL WHERE id=?');
   foreach ($linked as $id) $q->execute([(int)$id]);
+  $q = db()->prepare('UPDATE transfers SET import_key=NULL WHERE id=?');
+  foreach ($linkedMoves as $id) $q->execute([(int)$id]);
   return $n;
 }
 
@@ -779,6 +826,8 @@ function statement_summary(array $rows, int $payerId, string $fileName = '', arr
     foreach ($in as $r) if (!empty($r['payer_id'])) $byOwner[(int)$r['payer_id']] = ($byOwner[(int)$r['payer_id']] ?? 0) + $r['amount'];
     foreach ($byOwner as $id => $v) $lines[] = '   · от ' . user_label($id) . ' — ' . fmt_money($v) . ' (запишу как её/его пополнение)';
   }
+  $atm = array_filter($rows, fn($r) => !empty($r['cash']) && !$r['duplicate']);
+  if ($atm) $lines[] = '🏧 Снятия наличных: ' . count($atm) . ' на ' . fmt_money(array_sum(array_column($atm, 'amount'))) . ' — запишу переводом с карты в «Наличные», не тратой';
   $out = array_filter($rows, fn($r) => empty($r['main']) && empty($r['purchase']) && !$r['duplicate']);
   if ($out) $lines[] = '↔️ Переводы, снятия, комиссии: ' . count($out) . ' — по умолчанию не импортирую';
   if (!empty($meta['available'])) {
@@ -805,7 +854,7 @@ function statement_scopes(array $rows): array {
     $in = array_filter($rows, fn($r) => !$r['duplicate'] && $r['date'] >= $from);
     $buy = array_filter($in, fn($r) => !empty($r['main']) || $r['purchase']);
     $out[] = ['key' => $key, 'from' => $from, 'label' => $label, 'buy' => count($buy),
-      'spend' => array_sum(array_map(fn($r) => $r['kind'] === 'expense' ? $r['amount'] : 0, $buy)),
+      'spend' => array_sum(array_map(fn($r) => $r['kind'] === 'expense' && empty($r['cash']) ? $r['amount'] : 0, $buy)),
       'income' => array_sum(array_map(fn($r) => $r['kind'] === 'topup' ? $r['amount'] : 0, $buy)), 'all' => count($in)];
   }
   return $out;
@@ -833,7 +882,7 @@ function statement_list_messages(array $rows): array {
   $out = []; $buf = '';
   foreach ($rows as $r) {
     $d = (new DateTimeImmutable($r['date']))->format('d.m');
-    $mark = ($r['dup'] ?? null) === 'imported' ? '♻️' : (($r['dup'] ?? null) === 'manual' ? '✋' : ($r['purchase'] ? '🛒' : (!empty($r['incoming']) ? '💰' : '↔️')));
+    $mark = ($r['dup'] ?? null) === 'imported' ? '♻️' : (($r['dup'] ?? null) === 'manual' ? '✋' : ($r['purchase'] ? '🛒' : (!empty($r['incoming']) ? '💰' : (!empty($r['cash']) ? '🏧' : '↔️'))));
     $line = "$mark $d " . ($r['kind'] === 'expense' ? '−' : '+') . number_format($r['amount'], 0, ',', ' ') . " · {$r['category']} · " . mb_substr($r['note'] ?: $r['type'], 0, 40) . "\n";
     if (mb_strlen($buf . $line) > 3800) { $out[] = $buf; $buf = ''; }
     $buf .= $line;
@@ -937,6 +986,10 @@ function account_net(string $account, string $date): float {
   $net = (float)$q->fetchColumn();
   $q = db()->prepare('SELECT COALESCE(SUM(amount),0) FROM balance_adjustments WHERE account=? AND occurred_on<=?');
   $q->execute([$account, $date]);
+  $net += (float)$q->fetchColumn();
+  // Moves between accounts (cash withdrawals): out of one, into the other
+  $q = db()->prepare('SELECT COALESCE(SUM(CASE WHEN to_account=? THEN amount ELSE 0 END),0)-COALESCE(SUM(CASE WHEN from_account=? THEN amount ELSE 0 END),0) FROM transfers WHERE (from_account=? OR to_account=?) AND occurred_on<=?');
+  $q->execute([$account, $account, $account, $account, $date]);
   return $net + (float)$q->fetchColumn();
 }
 

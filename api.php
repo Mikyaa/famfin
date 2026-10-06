@@ -378,6 +378,14 @@ try {
     json_out(['ok'=>true, 'id'=>$id]);
   }
 
+  // Between our own accounts (cash withdrawal, card to card): balances stay, only the accounts change
+  if ($method === 'POST' && $action === 'account_move') {
+    $d = body();
+    $id = add_account_move((int)$member['id'], (string)($d['from'] ?? ''), (string)($d['to'] ?? ''), $d['amount'] ?? null, (string)($d['note'] ?? ''), (string)($d['date'] ?? date('Y-m-d')), (int)$member['id']);
+    json_out(['ok'=>true, 'id'=>$id]);
+  }
+  if ($method === 'POST' && $action === 'tx_to_move') { json_out(['ok'=>true, 'id'=>transaction_to_move((int)(body()['id'] ?? 0), (int)$member['id'])]); }
+
   if ($method === 'POST' && $action === 'goal_save') { json_out(['ok'=>true, 'id'=>goal_save(body(), $member), 'goals'=>goals_list()]); }
   if ($method === 'POST' && $action === 'goal_move') { $d = body(); goal_move((int)($d['id'] ?? 0), $d['amount'] ?? null, $member); json_out(['ok'=>true, 'goals'=>goals_list()]); }
   if ($method === 'POST' && $action === 'goal_close') { goal_close((int)(body()['id'] ?? 0)); json_out(['ok'=>true, 'goals'=>goals_list()]); }
@@ -409,7 +417,7 @@ try {
     $d = body();
     if (!is_array($d['rows'] ?? null)) json_out(['error'=>'Нет данных'], 422);
     $res = import_rows($d['rows'], (int)($d['payer_id'] ?? $member['id']));
-    json_out(['ok'=>true, 'imported'=>count($res['ids']), 'linked'=>count($res['linked']), 'skipped'=>$res['skipped']]);
+    json_out(['ok'=>true, 'imported'=>count($res['ids']), 'linked'=>count($res['linked']) + count($res['linked_moves']), 'skipped'=>$res['skipped'], 'cash'=>count($res['moves'])]);
   }
 
   if ($method === 'POST' && $action === 'main') {

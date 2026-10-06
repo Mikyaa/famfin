@@ -16,6 +16,9 @@ function family_schema(PDO $pdo): void {
     ['transactions', 'photo', 'VARCHAR(64) NULL'],
     ['transactions', 'trip_id', 'BIGINT NULL'],
     ['transfers', 'settle', 'INTEGER NOT NULL DEFAULT 0'],
+    ['transfers', 'from_account', 'VARCHAR(80) NULL'],
+    ['transfers', 'to_account', 'VARCHAR(80) NULL'],
+    ['transfers', 'import_key', 'VARCHAR(40) NULL'],
     ['goals', 'monthly', 'DECIMAL(14,2) NULL'],
     ['goal_moves', 'source_tx', 'BIGINT NULL'],
   ];
