@@ -226,7 +226,7 @@ function bot_statement_entries(array $rows, bool $all, string $from = '0000-00-0
   foreach (statement_keys($rows) as $r) {
     if ((!$all && empty($r['main']) && !$r['purchase']) || $r['date'] < $from) continue;
     $out[] = ['kind' => $r['kind'], 'amount' => $r['amount'], 'category' => $r['category'], 'note' => $r['note'], 'date' => $r['date'], 'key' => $r['key'],
-      'payer_id' => $r['payer_id'] ?? null, 'account' => $r['account'] ?? '', 'cash' => !empty($r['cash'])];
+      'payer_id' => $r['payer_id'] ?? null, 'account' => $r['account'] ?? '', 'cash' => !empty($r['cash']), 'route' => $r['route'] ?? null, 'target' => $r['target'] ?? null];
   }
   return $out;
 }
@@ -251,7 +251,7 @@ function bot_import_report(array $res, array $entries, int $payer): string {
   if ($res['moves']) {
     $q = db()->prepare('SELECT COALESCE(SUM(amount),0) FROM transfers WHERE id IN (' . implode(',', array_map('intval', $res['moves'])) . ')');
     $q->execute();
-    $lines[] = '🏧 Снятия наличных: ' . count($res['moves']) . ' на ' . fmt_money((float)$q->fetchColumn()) . ' — переведены в «' . cash_account($payer) . '», тратой не считаются';
+    $lines[] = '🔁 Снятия и переводы между своими (не траты): ' . count($res['moves']) . ' на ' . fmt_money((float)$q->fetchColumn()) . ' — остатки не меняются, меняются только счета';
   }
   if ($res['linked']) $lines[] = '✋ Совпали с записанными вручную: ' . count($res['linked']) . ' — не задвоены, отмечены как из выписки';
   if ($res['skipped']) $lines[] = '♻️ Уже были импортированы раньше: ' . $res['skipped'] . ' — пропущены';

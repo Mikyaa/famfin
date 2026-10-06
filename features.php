@@ -216,12 +216,13 @@ function categorize_text(string $text): ?string {
 
 /* ========== TRANSFERS ========== */
 // Money handed from one member to the other: personal balances move, the shared one does not
-function add_transfer(int $from, int $to, $amount, string $note, string $date, int $createdBy): int {
+// $account: the card the money left (imported transfers), so the card's balance follows the bank
+function add_transfer(int $from, int $to, $amount, string $note, string $date, int $createdBy, string $account = '', ?string $key = null): int {
   $a = parse_amount($amount);
   $note = trim($note);
   if (!is_member_id($from) || !is_member_id($to) || $from === $to) throw new RuntimeException('Выберите, кто кому передал');
   if ($a === null || !valid_date($date) || mb_strlen($note) > 500) throw new RuntimeException('Проверьте сумму и дату перевода');
-  db()->prepare('INSERT INTO transfers(from_id,to_id,amount,note,occurred_on,created_by) VALUES(?,?,?,?,?,?)')->execute([$from, $to, $a, $note, $date, $createdBy]);
+  db()->prepare('INSERT INTO transfers(from_id,to_id,amount,note,occurred_on,created_by,from_account,import_key) VALUES(?,?,?,?,?,?,?,?)')->execute([$from, $to, $a, $note, $date, $createdBy, $account !== '' ? $account : null, $key]);
   $id = (int)db()->lastInsertId();
   mark_balance_changed();
   audit('create', 'transfer', $id, transfer_summary(['from_id' => $from, 'to_id' => $to, 'amount' => $a, 'occurred_on' => $date]));
@@ -521,13 +522,41 @@ function parse_bank_statement(string $text, int $payerId): array {
     // ATM withdrawal: the money stays ours, it moves from the card to cash
     $cash = $kind === 'expense' && str_starts_with($type, 'сняти');
     if ($cash) $category = 'Снятие наличных';
-    $main = ($isPurchase && $kind === 'expense') || $incoming || $cash;
+    [$route, $target] = $cash ? [null, null] : statement_route($kind, $type, $details, $payerId);
+    if ($route === 'loan') $category = 'Кредиты';
+    elseif ($route === 'people') $category = 'Переводы';
+    elseif ($route === 'cash_in') $category = 'Наличные на карту';
+    elseif ($route === 'member') $category = 'Перевод ' . user_label((int)$target);
+    elseif ($route === 'own') $category = 'На свой счёт';
+    // Everything that moves the card's money is imported, so the card balance matches the bank
+    $main = ($isPurchase && $kind === 'expense') || $incoming || $cash || $route !== null || $kind === 'expense';
+    if ($route === 'cash_in') { $incoming = false; $owner = null; }
     $rows[] = ['date' => $date, 'kind' => $kind, 'amount' => $amount, 'type' => $x[6], 'note' => mb_substr($details, 0, 200),
       'category' => $category, 'group' => category_group_of($category), 'purchase' => $isPurchase && $kind === 'expense', 'cash' => $cash,
+      'route' => in_array($route, ['member', 'own', 'cash_in'], true) ? $route : null, 'target' => $target,
       'incoming' => $incoming, 'main' => $main, 'payer_id' => $owner, 'account' => $meta['account'],
       'include' => $main, 'duplicate' => false, 'dup' => null];
   }
   return mark_statement_duplicates(statement_keys($rows), $payerId);
+}
+
+// What an outgoing transfer (or a cash deposit) really is:
+//   loan    — "на свой Оплата Kaspi Кредита / Kaspi Red": a credit payment, spending in «Кредиты»
+//   member  — to the other member ("Томирис Ж."): a transfer inside the family, target = member id
+//   own     — "На карту Halyk Bank*2093", "на свой Kaspi Депозит": our other account, target = its name
+//   people  — to anyone else: spending in «Переводы»
+function statement_route(string $kind, string $type, string $details, int $payerId): array {
+  $d = mb_strtolower($details);
+  if ($kind === 'topup') return [null, null];
+  if (!str_starts_with($type, 'перевод') && !str_starts_with($type, 'разное')) return [null, null];
+  if (preg_match('/кредит|kaspi red|рассрочк/u', $d)) return ['loan', null];
+  if (str_starts_with($type, 'разное')) return [null, null];
+  if (($m = member_in_text($details, $payerId)) !== null) return ['member', $m];
+  if (preg_match('/^(?:на карту|на свой)\s+(.+)$/iu', trim($details), $x)) {
+    $name = trim(preg_replace(['/\s*\*\s*/u', '/\s{2,}/u'], [' *', ' '], $x[1]));
+    return ['own', mb_substr($name, 0, 80)];
+  }
+  return ['people', null];
 }
 
 // Source label of a statement line: date, kind, amount, operation and counterparty, plus the
@@ -610,8 +639,11 @@ function import_rows(array $rows, int $payerId): array {
   foreach ($rows as $i => $r) {
     try {
       $owner = (int)($r['payer_id'] ?? 0);
-      $extra = ['key' => $r['key'], 'owner' => is_member_id($owner) ? $owner : $payerId, 'account' => (string)($r['account'] ?? ''), 'cash' => !empty($r['cash'])];
-      if ($extra['cash']) {
+      $route = in_array($r['route'] ?? null, ['member', 'own', 'cash_in'], true) ? $r['route'] : null;
+      $extra = ['key' => $r['key'], 'owner' => is_member_id($owner) ? $owner : $payerId, 'account' => (string)($r['account'] ?? ''), 'cash' => !empty($r['cash']),
+        'route' => $route, 'target' => $r['target'] ?? null];
+      if ($route === 'member' && !is_member_id((int)$extra['target'])) throw new RuntimeException('Неверный участник перевода');
+      if ($extra['cash'] || $route) {
         $a = parse_amount($r['amount'] ?? null);
         if ($a === null || !valid_date((string)($r['date'] ?? ''))) throw new RuntimeException('Проверьте сумму и дату');
         $entries[] = ['kind' => 'expense', 'amount' => $a, 'date' => (string)$r['date'], 'note' => mb_substr(trim((string)($r['note'] ?? '')), 0, 500)] + $extra;
@@ -633,6 +665,18 @@ function import_rows(array $rows, int $payerId): array {
       if (isset($known[$e['key']])) { $result['skipped']++; continue; }
       $pools[$e['owner']] ??= manual_matches($e['owner'], min($dates), max($dates));
       $k = statement_match_key($e);
+      if ($e['route']) {
+        // Moves of the card's money that are not spending: inside the family, to our other account, cash onto the card
+        audit_mute(true);
+        try {
+          if ($e['route'] === 'member') $id = add_transfer($e['owner'], (int)$e['target'], $e['amount'], $e['note'], $e['date'], actor() ?: $payerId, $e['account'], $e['key']);
+          elseif ($e['route'] === 'own') $id = add_account_move($e['owner'], $e['account'], (string)$e['target'], $e['amount'], $e['note'], $e['date'], actor() ?: $payerId, $e['key']);
+          else $id = add_account_move($e['owner'], cash_account($e['owner']), $e['account'], $e['amount'], $e['note'], $e['date'], actor() ?: $payerId, $e['key']);
+        } finally { audit_mute(false); }
+        $result['moves'][] = $id;
+        $known[$e['key']] = true;
+        continue;
+      }
       if ($e['cash']) {
         // A withdrawal: a move from the statement's card to cash, or the label on one typed by hand
         if (!empty($pools[$e['owner']][$k])) {
@@ -825,6 +869,15 @@ function statement_summary(array $rows, int $payerId, string $fileName = '', arr
     foreach ($in as $r) if (!empty($r['payer_id'])) $byOwner[(int)$r['payer_id']] = ($byOwner[(int)$r['payer_id']] ?? 0) + $r['amount'];
     foreach ($byOwner as $id => $v) $lines[] = '   · от ' . user_label($id) . ' — ' . fmt_money($v) . ' (запишу как её/его пополнение)';
   }
+  $routes = ['member' => '👫 Переводы внутри семьи', 'own' => '🔁 На свои счета', 'cash_in' => '💵 Наличные на карту'];
+  foreach ($routes as $rk => $label) {
+    $rr = array_filter($rows, fn($r) => ($r['route'] ?? null) === $rk && !$r['duplicate']);
+    if ($rr) $lines[] = $label . ': ' . count($rr) . ' на ' . fmt_money(array_sum(array_column($rr, 'amount'))) . ' — не трата, остаток карты сойдётся с банком';
+  }
+  $loans = array_filter($rows, fn($r) => !$r['duplicate'] && !$r['purchase'] && $r['category'] === 'Кредиты');
+  if ($loans) $lines[] = '🏦 Платежи по кредитам: ' . count($loans) . ' на ' . fmt_money(array_sum(array_column($loans, 'amount')));
+  $people = array_filter($rows, fn($r) => !$r['duplicate'] && !$r['purchase'] && $r['category'] === 'Переводы');
+  if ($people) $lines[] = '↗️ Переводы людям: ' . count($people) . ' на ' . fmt_money(array_sum(array_column($people, 'amount'))) . ' — запишу тратой «Переводы», можно поправить';
   $atm = array_filter($rows, fn($r) => !empty($r['cash']) && !$r['duplicate']);
   if ($atm) $lines[] = '🏧 Снятия наличных: ' . count($atm) . ' на ' . fmt_money(array_sum(array_column($atm, 'amount'))) . ' — запишу переводом с карты в «' . cash_account($payerId) . '», не тратой';
   $out = array_filter($rows, fn($r) => empty($r['main']) && empty($r['purchase']) && !$r['duplicate']);
@@ -853,8 +906,8 @@ function statement_scopes(array $rows): array {
     $in = array_filter($rows, fn($r) => !$r['duplicate'] && $r['date'] >= $from);
     $buy = array_filter($in, fn($r) => !empty($r['main']) || $r['purchase']);
     $out[] = ['key' => $key, 'from' => $from, 'label' => $label, 'buy' => count($buy),
-      'spend' => array_sum(array_map(fn($r) => $r['kind'] === 'expense' && empty($r['cash']) ? $r['amount'] : 0, $buy)),
-      'income' => array_sum(array_map(fn($r) => $r['kind'] === 'topup' ? $r['amount'] : 0, $buy)), 'all' => count($in)];
+      'spend' => array_sum(array_map(fn($r) => $r['kind'] === 'expense' && empty($r['cash']) && empty($r['route']) ? $r['amount'] : 0, $buy)),
+      'income' => array_sum(array_map(fn($r) => $r['kind'] === 'topup' && empty($r['route']) ? $r['amount'] : 0, $buy)), 'all' => count($in)];
   }
   return $out;
 }

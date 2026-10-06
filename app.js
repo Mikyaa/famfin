@@ -1805,7 +1805,7 @@ function renderImportRows(){
       <span class="import-main">
         <span class="import-top"><b>${safe(r.note || r.type)}</b><b class="tx-amount ${r.kind}">${r.kind === 'expense' ? '−' : '+'}${money(r.amount)}</b></span>
         <span class="import-meta">${fmtDate(r.date)} · ${safe(r.type)}${r.dup === 'imported' ? ' · <em>уже импортирована раньше</em>' : r.dup === 'manual' ? ' · <em>уже записана вручную</em>' : ''}</span>
-        ${r.cash ? `<span class="import-meta">🏧 Перевод в «${safe(cashAccountName(importPayer))}» — не трата</span>` : `<select data-cat="${i}" aria-label="Категория">${cats.map(x => `<option ${x === r.category ? 'selected' : ''}>${safe(x)}</option>`).join('')}</select>`}
+        ${r.cash || r.route ? `<span class="import-meta">${r.cash ? `🏧 Перевод в «${safe(cashAccountName(importPayer))}»` : r.route === 'cash_in' ? `💵 Из «${safe(cashAccountName(importPayer))}» на карту` : r.route === 'own' ? `🔁 На свой счёт «${safe(r.target)}»` : `👫 ${safe(r.category)}`} — не трата</span>` : `<select data-cat="${i}" aria-label="Категория">${cats.map(x => `<option ${x === r.category ? 'selected' : ''}>${safe(x)}</option>`).join('')}</select>`}
       </span>
     </label>`;
   }).join('');
@@ -1815,13 +1815,13 @@ function renderImportRows(){
 }
 function syncImportSummary(){
   const sel = importRows.filter(r => r.include);
-  const sum = sel.reduce((s, r) => s + (r.kind === 'expense' && !r.cash ? r.amount : 0), 0);
+  const sum = sel.reduce((s, r) => s + (r.kind === 'expense' && !r.cash && !r.route ? r.amount : 0), 0);
   $('#importSummary').innerHTML = `Найдено ${importRows.length} операций. Выбрано <b>${sel.length}</b>${sum ? `, расходов на <b>${money(sum)} ${cur(currency)}</b>` : ''}. Снятия наличных запишутся переводом с карты в «${safe(cashAccountName(importPayer))}», не тратой. Переводы и уже записанные операции не отмечены — проверьте их сами.`;
   $('#importConfirm').disabled = !sel.length;
   $('#importConfirm').textContent = sel.length ? `Импортировать ${sel.length}` : 'Ничего не выбрано';
 }
 $('#importConfirm').onclick = async () => {
-  const rows = importRows.filter(r => r.include).map(r => ({kind: r.kind, amount: r.amount, category: r.category, note: r.note, date: r.date, key: r.key, type: r.type, payer_id: r.payer_id, account: r.account, cash: r.cash}));
+  const rows = importRows.filter(r => r.include).map(r => ({kind: r.kind, amount: r.amount, category: r.category, note: r.note, date: r.date, key: r.key, type: r.type, payer_id: r.payer_id, account: r.account, cash: r.cash, route: r.route, target: r.target}));
   const btn = $('#importConfirm'); btn.disabled = true;
   try {
     const d = await request('api.php?action=import', {method:'POST', body: JSON.stringify({rows, payer_id: importPayer})});
